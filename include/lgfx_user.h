@@ -9,6 +9,8 @@
 
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
+#include <lgfx/v1/platforms/esp32s3/Bus_RGB.hpp>
+#include <lgfx/v1/platforms/esp32s3/Panel_RGB.hpp>
 
 class LGFX : public lgfx::LGFX_Device
 {
@@ -100,7 +102,7 @@ public:
             cfg.bus_shared   = false;
             cfg.offset_rotation = 0;
 
-            cfg.i2c_port = I2C_NUM_0;
+            cfg.i2c_port = 0;
             cfg.i2c_addr = 0x5D;            // GT911: 0x5D or 0x14
             cfg.pin_sda  = GPIO_NUM_19;
             cfg.pin_scl  = GPIO_NUM_20;

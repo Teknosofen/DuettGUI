@@ -1,0 +1,106 @@
+#include "screen_cube.h"
+#include "../display/display.h"
+#include <Arduino.h>
+#include <math.h>
+
+static lgfx::LGFX_Sprite* canvas = nullptr;  // allocated in screen_cube_init()
+
+static const float V[8][3] = {
+    {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
+    {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1}
+};
+static const uint8_t E[12][2] = {
+    {0,1},{1,2},{2,3},{3,0},
+    {4,5},{5,6},{6,7},{7,4},
+    {0,4},{1,5},{2,6},{3,7}
+};
+
+static float ang_x = 0.4f, ang_y = 0.0f;
+static float pos_x = 400.0f, pos_y = 240.0f;
+
+static void rotXY(float ix, float iy, float iz, float rx, float ry,
+                  float &ox, float &oy, float &oz)
+{
+    float y1 = iy * cosf(rx) - iz * sinf(rx);
+    float z1 = iy * sinf(rx) + iz * cosf(rx);
+    ox =  ix * cosf(ry) + z1 * sinf(ry);
+    oy =  y1;
+    oz = -ix * sinf(ry) + z1 * cosf(ry);
+}
+
+static void project(float x, float y, float z, int &px, int &py)
+{
+    const float FOV = 260.0f, ZDIST = 3.5f;
+    float s = FOV / (z + ZDIST);
+    px = (int)(x * s + pos_x);
+    py = (int)(y * s + pos_y);
+}
+
+void screen_cube_init()
+{
+    size_t needed = (size_t)display->width() * display->height() * 2;
+    Serial.printf("  sprite needs %u KB, PSRAM free %u KB, heap free %u KB\n",
+        (unsigned)(needed / 1024),
+        (unsigned)(ESP.getFreePsram() / 1024),
+        (unsigned)(ESP.getFreeHeap()  / 1024));
+    Serial.flush();
+
+    canvas = new lgfx::LGFX_Sprite(display);
+    canvas->setColorDepth(16);
+    void* ptr = canvas->createSprite(display->width(), display->height());
+
+    if (ptr) {
+        Serial.println("  sprite OK (double-buffered)");
+    } else {
+        Serial.println("  sprite FAILED — will draw directly (expect flicker)");
+        delete canvas;
+        canvas = nullptr;
+    }
+    Serial.flush();
+}
+
+void screen_cube_update()
+{
+    uint32_t t0 = millis();
+
+    int32_t tx, ty;
+    if (display->getTouch(&tx, &ty)) {
+        pos_x = (float)tx;
+        pos_y = (float)ty;
+    }
+
+    ang_x += 0.018f;
+    ang_y += 0.026f;
+
+    int   px[8], py[8];
+    float pz[8];
+    for (int i = 0; i < 8; i++) {
+        float ox, oy, oz;
+        rotXY(V[i][0], V[i][1], V[i][2], ang_x, ang_y, ox, oy, oz);
+        pz[i] = oz;
+        project(ox, oy, oz, px[i], py[i]);
+    }
+
+    lgfx::LGFXBase* target = canvas ? (lgfx::LGFXBase*)canvas
+                                     : (lgfx::LGFXBase*)display;
+
+    target->fillScreen(TFT_BLACK);
+
+    for (int i = 0; i < 12; i++) {
+        int a = E[i][0], b = E[i][1];
+        float midz = (pz[a] + pz[b]) * 0.5f;
+        uint8_t br = (uint8_t)((1.0f - midz) * 87.5f + 80.0f);
+        target->drawLine(px[a], py[a], px[b], py[b],
+                         target->color888(br, br, br));
+    }
+
+    target->setTextColor(target->color888(80, 80, 80), TFT_BLACK);
+    target->setTextSize(1);
+    target->setCursor(5, 5);
+    target->print(canvas ? "Touch: move cube" : "Touch: move cube (no PSRAM)");
+
+    if (canvas) canvas->pushSprite(0, 0);
+
+    int dt = (int)(millis() - t0);
+    if (dt < 16) delay(16 - dt);
+}
