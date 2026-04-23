@@ -34,6 +34,14 @@ Pixel clock: **15 MHz**.
 
 The board uses a **USB-UART bridge** (CH340) connected to UART0 (GPIO43 TX / GPIO44 RX) — this is the only serial path. GPIO19/20, which are the ESP32-S3 native USB D−/D+ pins, are wired to the GT911 touch controller instead. Do **not** set `ARDUINO_USB_CDC_ON_BOOT` or `ARDUINO_USB_MODE` in build flags.
 
+#### UART0 shared between GPS and programming
+
+The GPS module is also wired to UART0 (GPIO43/44) via the UART0/UART1 HY2.0-4P connector on the board edge. This means **UART0 cannot be used for `Serial` debug output** while the GPS is connected — it is initialised at 9600 baud exclusively for the GPS (`gps_init()` calls `Serial.begin(9600)`).
+
+Debug output is replaced by the WiFi web console (see [WiFi Log Console](#wifi-log-console) below).
+
+**Flashing firmware while GPS is connected is not safe** — the CH340 drives GPIO44 (RX) during upload, which collides with the GPS TX line. Disconnect the GPS RX wire (board RX → GPS TX) before flashing, or power off the GPS module.
+
 ---
 
 ## Project Setup
@@ -41,23 +49,33 @@ The board uses a **USB-UART bridge** (CH340) connected to UART0 (GPIO43 TX / GPI
 **`platformio.ini`:**
 
 ```ini
-[env:esp32-s3-devkitc-1]
+[platformio]
+default_envs = usb
+
+[base]
 ; pioarduino: arduino-esp32 3.x / IDF 5.x — required for OPI PSRAM + RGB LCD
 platform     = https://github.com/pioarduino/platform-espressif32/releases/download/51.03.07/platform-espressif32.zip
 board        = esp32-s3-devkitc-1
 framework    = arduino
 monitor_speed = 115200
-upload_speed  = 921600
-
 board_build.arduino.memory_type = qio_opi
 board_build.flash_mode          = qio
 board_upload.flash_size         = 4MB
-board_upload.maximum_size       = 4194304
-board_build.partitions          = no_ota.csv
+board_build.partitions          = partitions_ota.csv
 board_build.filesystem          = littlefs
-
 lib_deps =
     lovyan03/LovyanGFX @ ^1.1.16
+    adafruit/Adafruit GPS Library @ ^1.5.4
+
+[env:usb]
+extends      = base
+upload_speed = 921600
+
+[env:ota]
+extends         = base
+upload_protocol = espota
+upload_port     = 192.168.4.1
+upload_flags    = --auth=duett1964
 ```
 
 > **Why pioarduino?** The standard `espressif32` platform uses IDF 4.4 which hangs during OPI PSRAM init. pioarduino 51.03.07 uses IDF 5.x which initialises PSRAM correctly.
@@ -86,20 +104,20 @@ lib_deps =
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   ScreenManager                     │
-│  touch polling · page switching · nav bar           │
-├──────────┬──────────────┬───────────┬───────────────┤
-│ Screen   │ Screen       │ Screen    │ Screen  · · · │
-│ Cube     │ Vehicle      │ GPS       │ (future)      │
-├──────────┴──────────────┴───────────┴───────────────┤
-│         Widget  (dataRow · hRule · sectionLabel)    │
-├─────────────────────────────────────────────────────┤
-│                   VehicleData                       │
-│   shared struct updated by sensor readers           │
-├──────────────────────────────────────────────────────┤
-│        display.h / LovyanGFX / RGB LCD panel        │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                        ScreenManager                             │
+│     touch polling · page switching · nav bar                     │
+├───────────┬──────────────┬───────────┬───────────┬──────────────┤
+│ Screen    │ Screen       │ Screen    │ Screen    │ Screen · · · │
+│ Dash      │ Vehicle      │ GPS       │ Cube      │ (future)     │
+├───────────┴──────────────┴───────────┴───────────┴──────────────┤
+│             Widget  (dataRow · hRule · sectionLabel)             │
+├──────────────────────────────────────────────────────────────────┤
+│                         VehicleData                              │
+│   shared struct — updated by GPS reader and/or sim_update()      │
+├──────────────────────────────────────────────────────────────────┤
+│              display.h / LovyanGFX / RGB LCD panel               │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Screen layout
@@ -128,28 +146,42 @@ src/
 │
 ├── data/
 │   ├── vehicle_data.h          — VehicleData struct (all sensor values)
-│   └── vehicle_data.cpp        — global vdata instance
+│   ├── vehicle_data.cpp        — global vdata instance
+│   ├── sim.h                   — SIM_ENABLE #define toggle
+│   └── sim.cpp                 — synthetic drive-cycle (compiles away when SIM_ENABLE 0)
 │
 ├── display/
 │   ├── display.h               — extern LGFX* display
 │   └── display.cpp             — display_init()
 │
+├── sensors/
+│   ├── gps_reader.h            — gps_init() · gps_update()
+│   └── gps_reader.cpp          — Adafruit_GPS on UART0, populates vdata
+│
+├── net/
+│   ├── wifi_log.h              — wlog() declaration + WIFI_LOG_SSID / PASS
+│   ├── wifi_log.cpp            — WiFi AP + ring-buffer HTTP log server
+│   ├── ota.h                   — OTA_HOSTNAME / OTA_PASSWORD
+│   └── ota.cpp                 — ArduinoOTA with wlog() progress callbacks
+│
 ├── ui/
 │   ├── screen.h                — abstract Screen base class
 │   ├── screen_manager.h/.cpp   — page registry · touch routing · nav bar
-│   ├── screen_cube.h/.cpp      — rotating wireframe cube demo
+│   ├── screen_dash.h/.cpp      — Dashboard: speed + RPM dials with extras
 │   ├── screen_vehicle.h/.cpp   — engine / fuel sensor readout
 │   ├── screen_gps.h/.cpp       — GPS speed · heading · position
+│   ├── screen_cube.h/.cpp      — rotating wireframe cube demo
 │   └── widgets.h/.cpp          — shared stateless drawing helpers
 │
 └── fs/
     ├── storage.h/.cpp          — LittleFS helpers (init · read · write · remove)
-    └── storage.h/.cpp          — SD card helpers  (init · read · write · remove)
+    └── sd_storage.h/.cpp       — SD card helpers  (init · read · write · remove)
 
 include/
 └── lgfx_user.h                 — LovyanGFX Panel_RGB + Light_PWM + Touch_GT911
 
 data/                           — LittleFS root (pio run -t uploadfs)
+partitions_ota.csv              — custom 4 MB OTA partition layout
 ```
 
 ---
@@ -189,6 +221,10 @@ public:
                                uint16_t contentW, uint16_t contentH) = 0;
     virtual void        onTouch(uint16_t x, uint16_t y) {}
     virtual const char* name() const = 0;
+    void setNeedsRedraw()        { _needsRedraw = true; }
+    bool needsFullRedraw() const { return _needsRedraw; }
+protected:
+    bool _needsRedraw = true;
 };
 ```
 
@@ -196,11 +232,27 @@ public:
 - `update()` — called every frame; `gfx` is either a manager-level sprite or the display directly.
 - `onTouch()` — coordinates are relative to the content area top-left.
 
+#### `_needsRedraw` lifecycle
+
+`ScreenManager::goTo()` calls `setNeedsRedraw()` on the incoming page. The page's `update()` checks the flag to decide between a **full render** (clear background, draw all static labels, draw current values) or a **partial update** (erase and redraw only cells whose value changed since last frame).
+
+`ScreenManager` reads `needsFullRedraw()` *before* calling `update()` so it can redraw the nav bar after any full-screen clear. A page clears `_needsRedraw` inside `update()` once the full render is done.
+
+> **Critical rule for continuous-render pages:** A page such as `ScreenCube` that redraws its entire region every frame must set `_needsRedraw = false` at the **very start** of `update()`. If it does not, `needsFullRedraw()` returns `true` every frame and the `ScreenManager` redraws the nav bar every frame, causing visible flickering.
+
+#### `fillRect` vs `fillScreen`
+
+All pages clear their area with `gfx.fillRect(0, 0, contentW, contentH, TFT_BLACK)` — **never** `fillScreen`. In direct-draw mode `gfx` is the physical display; `fillScreen` would overwrite the nav bar area below the content region.
+
 ### Adding a new page
 
 1. Create `src/ui/screen_foo.h/.cpp` inheriting `Screen`.
-2. Implement `update()` using `vdata` fields and `Widget::` helpers.
-3. In `main.cpp`: add `static ScreenFoo screenFoo;` and `mgr.addPage(&screenFoo);`.
+2. Override `name()` and `update()`. Use `vdata` fields and `Widget::` helpers.
+3. In `update()`:
+   - If `_needsRedraw` is true: clear with `gfx.fillRect(0, 0, contentW, contentH, TFT_BLACK)`, draw all static labels, draw current values, set `_needsRedraw = false`.
+   - Otherwise: erase and redraw only cells whose value changed (partial update pattern).
+   - **Exception — continuous-render pages** (pages that redraw everything every frame, like `ScreenCube`): set `_needsRedraw = false` at the very top of `update()` before any drawing so the manager does not misinterpret every frame as a full-screen clear.
+4. In `main.cpp`: add `static ScreenFoo screenFoo;` and `mgr.addPage(&screenFoo);`.
 
 ---
 
@@ -216,6 +268,19 @@ On `update()`: polls touch → routes to page or nav bar → calls `page->update
 
 Attempts to allocate a full content-area sprite (800×432, ~675 KB) for flicker-free rendering. Falls back to direct draw if the allocation fails.
 
+#### Touch debounce
+
+Raw GT911 touch events are asserted for many consecutive frames. Two guards prevent accidental double-navigation:
+
+1. **Rising-edge detection** — `_touchActive` tracks whether a finger was already down last frame. Navigation fires only on the first frame of a new touch (`risingEdge = touching && !_touchActive`).
+2. **Time cooldown** — `NAV_COOLDOWN_MS` (defined in `screen_manager.h`) is the minimum milliseconds between page switches. Increase it if double-tap still occurs; decrease it for snappier response.
+
+Content-area touches (`ty < contentH`) are forwarded to the active page every frame so continuous drags (e.g. moving the cube) remain smooth.
+
+#### Nav bar render budget (`_navDirty`)
+
+`drawNavBar()` is called only when `_navDirty` is true **or** the page just did a full-screen clear (detected via `needsFullRedraw()` polled before `update()`). In steady state — no page switch, no full redraw — the nav bar is never touched, which eliminates its flicker during animation.
+
 ---
 
 ### `Widget` namespace  (`src/ui/widgets.h`)
@@ -225,6 +290,7 @@ Stateless helpers; all functions take `lgfx::LovyanGFX& gfx` so they work on any
 | Function | Description |
 |---|---|
 | `Widget::dataRow(gfx, y, label, value, unit, color)` | Label left / value right-aligned / unit; standard row height 80 px |
+| `Widget::updateRowValue(gfx, rowY, stored, sz, newVal, color)` | Partial update: erases value cell and redraws only if `newVal` differs from `stored`; updates `stored` in place |
 | `Widget::hRule(gfx, y, w)` | Thin horizontal separator line |
 | `Widget::sectionLabel(gfx, x, y, text)` | Small gray heading |
 
@@ -232,11 +298,107 @@ Stateless helpers; all functions take `lgfx::LovyanGFX& gfx` so they work on any
 
 ## Pages
 
+### ScreenDash  —  `"Dashboard"` (page 1)
+
+Two analogue dials side-by-side with a centre column of scalar extras.
+
+#### Layout (800 × 432 content area)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Speed                         │                        Engine RPM      │
+│                                │                                        │
+│         ┌─────────┐       Throttle [%]        ┌─────────┐              │
+│         │  dial   │        Fuel [L/100km]      │  dial   │              │
+│         │  140    │        MAP [kPa]           │  6000   │              │
+│         └─────────┘                            └─────────┘              │
+│        cx=175, cy≈216         cx=400          cx=625, cy≈216            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+| Element | Value |
+|---|---|
+| Dial radius | 140 px |
+| Speed dial centre | (175, 226) |
+| RPM dial centre | (625, 226) |
+| Centre column x | 400 |
+| Extras top y | cy − 75 = 151 |
+| Extra row spacing | 55 px |
+| Gauge arc sweep | 270° (7:30-o'clock → 4:30-o'clock, CW) |
+
+#### Angle conventions
+
+LovyanGFX `fillArc` and the custom `ptAt()` helper use **different** zero-angle origins:
+
+| Convention | Zero direction | Used for |
+|---|---|---|
+| `ptAt` (dial) | 12-o'clock, CW | Tick line endpoints, label positions |
+| `fillArc` (GFX) | 3-o'clock, CW | Coloured arc and background track |
+
+Offset between them is exactly **90°** (subtracting 90° from the dial angle gives the GFX angle).
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `DIAL_START` | 225° | Gauge zero (7:30-o'clock) in ptAt convention |
+| `ARC_START` | 135° | Same position in fillArc convention (225 − 90) |
+| `DIAL_SWEEP` | 270° | Full-scale arc span |
+
+#### Speed dial
+
+| Property | Value |
+|---|---|
+| Range | 0 – 140 km/h |
+| Major ticks / labels | every 20 km/h |
+| Minor ticks | every 10 km/h |
+| Colour (normal) | Cyan `0x00BFFF` |
+| Warning zone | ≥ 72% of scale ≈ 101 km/h → amber |
+| Red zone | ≥ 86% of scale ≈ 120 km/h → red |
+| Centre number | Current speed, size-5 font, km/h unit |
+
+#### RPM dial
+
+| Property | Value |
+|---|---|
+| Range | 0 – 6000 rpm |
+| Major ticks / labels | every 1000 rpm (shown as `x1000 rpm`) |
+| Minor ticks | every 500 rpm |
+| Colour (normal) | Green `0x00FF88` |
+| Warning zone | ≥ 75% of scale ≈ 4500 rpm → amber |
+| Red zone | ≥ 92% of scale ≈ 5500 rpm → red |
+| Centre number | Current RPM, size-5 font, rpm unit |
+
+#### Centre column extras
+
+Three `updateExtra()` cells stacked vertically, redrawn only when label or value string changes:
+
+| Cell | Label | Source | Colour |
+|---|---|---|---|
+| Top | `Throttle [%]` | `vdata.throttle_pct` | Cyan |
+| Middle | `Fuel [L/100km]` or `Fuel [L/h]` | `vdata.fuel_per_100km` / `vdata.fuel_flow_lph` | Orange |
+| Bottom | `MAP [kPa]` | `vdata.map_kpa` | Orange |
+
+Fuel label switches automatically: `L/100km` when GPS fix is valid and speed > 2 km/h, otherwise `L/h`.
+
+#### Arc update gating
+
+To minimise flicker on a direct-draw display, the coloured arc is redrawn only when **both** conditions hold:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `ARC_THRESHOLD` | 1.0° | Minimum arc angle change required |
+| `ARC_MIN_MS` | 40 ms | Minimum time between redraws (≈ 25 fps cap) |
+
+The centre number is updated independently — redrawn only when the formatted integer string changes (no timer gate needed for text).
+
+---
+
 ### ScreenCube  —  `"Cube Demo"`
 
 Rotating wireframe 3D cube, touch to move. Uses a 300×300 sprite (~175 KB internal heap) centred in the content area. Falls back to direct draw if allocation fails.
 
 Projection: `scale = 180 / (z + 5)` → vertices project ≈ ±95 px from centre.
+
+**Render strategy:** redraws everything every frame (clear → draw edges → push sprite). Sets `_needsRedraw = false` at the very start of `update()` so `ScreenManager` never sees a persistent "full redraw" signal and does not redraw the nav bar every frame.
 
 ### ScreenVehicle  —  `"Vehicle"`
 
@@ -250,7 +412,9 @@ Five `Widget::dataRow` rows centred vertically:
 | Ambient pressure | `vdata.ambient_kpa` | Orange |
 | Fuel flow | `vdata.fuel_flow_lph` | Red |
 
-No sprite — draws directly on `gfx` each frame.
+No sprite — draws directly on `gfx`.
+
+**Render strategy:** on `_needsRedraw` performs a full render (background + labels + units + values); on subsequent frames calls `Widget::updateRowValue()` for each row, which erases and redraws the value cell only when the formatted string changes.
 
 ### ScreenGPS  —  `"GPS"`
 
@@ -268,7 +432,106 @@ No sprite — draws directly on `gfx` each frame.
 └─────────────────────────────────────────────────┘
 ```
 
-No sprite — draws directly on `gfx` each frame.
+No sprite — draws directly on `gfx`.
+
+**Render strategy:** `drawStatic()` draws section labels, unit strings, dividers and separators once (called only when `_needsRedraw`). Dynamic fields (speed, heading, compass point, lat, lon, altitude, fuel, GPS dot) are updated each frame via `updateField()` / `updateFieldRight()` helpers that erase and redraw a field's bounding rectangle only when its formatted string value changes.
+
+---
+
+## Sensor Simulation
+
+A synthetic drive cycle animates `vdata` so the dashboard can be tested without a running engine or GPS fix.
+
+### Enabling / disabling
+
+```c
+// src/data/sim.h
+#define SIM_ENABLE 1   // 1 = simulate,  0 = real sensors
+```
+
+When `SIM_ENABLE` is 0 the entire `sim.cpp` translation unit is skipped and `sim_update()` is an empty `inline` — zero code size, zero runtime cost.
+
+`sim_update()` is called in `loop()` **after** `gps_update()`, so it overwrites any real sensor data when enabled.
+
+### Drive cycle
+
+```
+ 0 s ──────────────────── 5 s ── 5.5 s ──────────────── 10.5 s → repeat
+      accelerate 0→100 km/h      hold        decelerate 100→0 km/h
+```
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `ACCEL_MS` | 5000 ms | Acceleration phase |
+| `HOLD_MS` | 500 ms | Constant-speed phase |
+| `DECEL_MS` | 5000 ms | Deceleration phase |
+| `CYCLE_MS` | 10 500 ms | Total period |
+| `MAX_SPEED` | 100 km/h | Peak speed |
+| `IDLE_RPM` | 850 rpm | Idle (speed = 0) |
+| `MAX_RPM` | 3500 rpm | At 100 km/h |
+
+Easing uses **smoothstep** (`t² × (3 − 2t)`) so the dials ease in and out rather than stepping linearly.
+
+### Fields updated by the simulator
+
+| Field | Behaviour |
+|---|---|
+| `speed_kmh` | Smoothstep 0 → 100 → 0 km/h |
+| `rpm` | Linear with speed: 850 + (speed/100) × 2650 |
+| `throttle_pct` | Builds during acceleration (20–85 %), 30 % at hold, 0 % on decel |
+| `map_kpa` | 45 + throttle × 0.6 when throttle > 0, else 32 kPa |
+| `fuel_flow_lph` | 1.5 + throttle × 0.12 when throttle > 0, else 0.8 L/h |
+| `fuel_per_100km` | Calculated from flow/speed when speed > 2 km/h |
+| `gps_valid` | Always `true` |
+| `lat` / `lon` | Fixed at Stockholm (59.3293° N, 18.0686° E) |
+| `altitude_m` | 28 m |
+| `heading_deg` | 45° |
+
+---
+
+## WiFi Log Console
+
+Because UART0 is occupied by the GPS, debug output is provided over WiFi instead.
+
+### Access point
+
+The ESP32 starts as an access point on boot:
+
+| Setting | Value |
+|---|---|
+| SSID | `DuettGUI` (set `WIFI_LOG_SSID` in `wifi_log.h`) |
+| Password | none — open network (set `WIFI_LOG_PASS` to change) |
+| IP | `192.168.4.1` |
+| Port | 80 |
+
+Connect any phone or laptop to the `DuettGUI` network and open `http://192.168.4.1` in a browser.
+
+### API
+
+| Function | Description |
+|---|---|
+| `wifi_log_init()` | Start AP and HTTP server — call in `setup()` |
+| `wifi_log_update()` | Handle pending clients — call every `loop()` |
+| `wlog(fmt, ...)` | `printf`-style log; prepends a `[NNN.Ns]` timestamp |
+
+`wlog()` writes into a 100-line ring buffer. The browser polls `/log?since=N` every second and receives only new lines as JSON. No WebSocket library needed.
+
+### Console features
+
+- Dark terminal-style UI, auto-scrolls to latest line
+- Timestamp prefix (`[NNN.Ns]`) highlighted in a dimmer colour
+- **Pause** checkbox — freezes display without losing buffered lines
+- **Clear display** — clears the screen view; history is still in the ring buffer
+- Green/grey dot in the header shows live connection state
+
+### Usage
+
+```cpp
+#include "net/wifi_log.h"
+
+wlog("RPM = %.0f  throttle = %.1f%%", vdata.rpm, vdata.throttle_pct);
+wlog("GPS fix lost");
+```
 
 ---
 
@@ -328,3 +591,84 @@ Use for data logging and large assets. `sd_init()` prints card type and capacity
 The RGB panel framebuffer is allocated by `esp_lcd_rgb_panel_create()` at `display->init()` — outside the Arduino heap — which is why `ESP.getPsramSize()` reports 0 while the display works normally.
 
 The `ScreenCube` sprite (300×300, 175 KB) is allocated from internal SRAM. `ScreenVehicle` and `ScreenGPS` draw directly with no sprite.
+
+---
+
+## OTA (Over-the-Air) Updates
+
+OTA is implemented and ready. No router is needed — the ESP32 runs as its own WiFi AP and accepts firmware uploads directly from a laptop connected to the `DuettGUI` network.
+
+### Flash layout
+
+| Partition | Size | Note |
+|---|---|---|
+| `app0` / `app1` | 1.75 MB each | Firmware fits comfortably (~1.0–1.3 MB) |
+| LittleFS | 448 KB | Use SD card for data logging |
+
+Defined in [partitions_ota.csv](partitions_ota.csv). `ArduinoOTA` is bundled with arduino-esp32 — no extra library entry needed.
+
+### OTA password
+
+Set in two places — they **must match**:
+
+| File | Symbol | Default |
+|---|---|---|
+| [src/net/ota.h](src/net/ota.h) | `OTA_PASSWORD` | `duett1964` |
+| [platformio.ini](platformio.ini) `[env:ota]` | `--auth=` | `duett1964` |
+
+### Uploading from VS Code (PlatformIO)
+
+`platformio.ini` defines two environments:
+
+| Environment | How it uploads | When to use |
+|---|---|---|
+| `usb` *(default)* | USB / CH340 at 921600 baud | First flash, recovery, GPS disconnected |
+| `ota` | `espota` over WiFi to `192.168.4.1` | Board running, laptop on `DuettGUI` network |
+
+#### Method 1 — PlatformIO sidebar (recommended)
+
+1. Open the **PlatformIO** panel in the VS Code activity bar (the ant icon).
+2. Expand **Project Tasks**.
+3. Expand the **`ota`** environment.
+4. Click **Upload**.
+
+PlatformIO compiles the firmware and pushes it wirelessly. Progress appears in the terminal and as `wlog()` entries in the web console.
+
+#### Method 2 — Environment switcher in the status bar
+
+1. Click the environment name in the VS Code **status bar** (bottom, e.g. `env:usb`).
+2. Select **`ota`** from the dropdown.
+3. Click the **→ Upload** arrow in the status bar (or press the PlatformIO upload shortcut).
+
+#### Method 3 — Integrated terminal
+
+```bash
+pio run -e ota -t upload
+```
+
+### OTA workflow
+
+1. Make code changes and save.
+2. Ensure your laptop is connected to the **`DuettGUI`** WiFi network.
+3. Open `http://192.168.4.1` in a browser — you will see log output confirming the board is alive.
+4. Trigger an upload using any method above.
+5. The web console shows:
+   ```
+   [NNN.Ns] OTA start: firmware
+   [NNN.Ns] OTA 0%
+   [NNN.Ns] OTA 10%
+   …
+   [NNN.Ns] OTA 100%
+   [NNN.Ns] OTA complete — rebooting
+   ```
+6. The board reboots into the new firmware automatically. Refresh the browser after ~5 seconds.
+
+### First-time flash (USB required)
+
+OTA can only update a board that already has OTA-capable firmware. The very first flash, and any recovery from a bad OTA, must be done over USB:
+
+1. Disconnect the GPS module (or at least its RX wire) — see [UART0 note](#uart0-shared-between-gps-and-programming).
+2. Hold **BOOT**, press **RESET**, release **BOOT** → download mode.
+3. In VS Code: use the `usb` environment → **Upload** (or `pio run -e usb -t upload`).
+4. Press **RESET** to boot normally.
+5. Reconnect the GPS.

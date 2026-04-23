@@ -4,7 +4,7 @@
 
 // Minimum time between nav-bar page switches (ms).
 // Raise if double-tap still occurs; lower for snappier response.
-#define NAV_COOLDOWN_MS  600
+#define NAV_COOLDOWN_MS  250
 
 // Owns all pages, handles touch routing and the fixed navigation bar.
 //

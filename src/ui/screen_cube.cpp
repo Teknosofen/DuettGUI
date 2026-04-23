@@ -56,6 +56,7 @@ void ScreenCube::init(uint16_t contentW, uint16_t contentH)
 
 void ScreenCube::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t contentH)
 {
+    _needsRedraw = false;  // cube redraws itself every frame; no full-redraw signal needed
     uint32_t t0 = millis();
 
     _angX += 0.018f;

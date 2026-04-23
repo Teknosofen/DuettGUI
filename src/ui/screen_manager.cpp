@@ -1,4 +1,5 @@
 #include "screen_manager.h"
+#include "../net/wifi_log.h"
 #include <Arduino.h>
 
 // Navigation bar palette
@@ -100,6 +101,7 @@ void ScreenManager::goTo(int index)
     if (index < 0 || index >= _count) return;
     _current = index;
     _touchActive = false;  // prevent the nav-tap bleeding into the new page
+    wlog("page → %s (%d/%d)", _pages[index]->name(), index + 1, _count);
 
     if (!_inited[index]) {
         _pages[index]->init(_contentW, _contentH);

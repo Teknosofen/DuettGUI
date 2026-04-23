@@ -1,61 +1,72 @@
 #include <Arduino.h>
 #include "display/display.h"
 #include "fs/storage.h"
+#include "sensors/gps_reader.h"
+#include "data/sim.h"
+#include "net/wifi_log.h"
+#include "net/ota.h"
 #include "ui/screen_manager.h"
-#include "ui/screen_cube.h"
+#include "ui/screen_dash.h"
 #include "ui/screen_vehicle.h"
 #include "ui/screen_gps.h"
+#include "ui/screen_cube.h"
 
 static ScreenManager mgr;
 
-static ScreenCube    screenCube;
+static ScreenDash    screenDash;
 static ScreenVehicle screenVehicle;
 static ScreenGPS     screenGPS;
+static ScreenCube    screenCube;
 
 void setup()
 {
-    Serial.begin(115200);
-    delay(3000);
+    // WiFi AP + web console — replaces Serial debug (UART0 is used by GPS).
+    wifi_log_init();
+    ota_init();
+    wlog("=== DuettGUI boot ===");
+    wlog("CPU %u MHz  Flash %u KB  Heap %u KB",
+         getCpuFrequencyMhz(),
+         (unsigned)(ESP.getFlashChipSize() / 1024),
+         (unsigned)(ESP.getFreeHeap()      / 1024));
 
-    Serial.println("\n=== DuettGUI boot ===");
-    Serial.printf("CPU  : %u MHz\n",  getCpuFrequencyMhz());
-    Serial.printf("Flash: %u KB\n",   (unsigned)(ESP.getFlashChipSize() / 1024));
-    Serial.printf("PSRAM: %u KB\n",   (unsigned)(ESP.getPsramSize()     / 1024));
-    Serial.printf("Heap : %u KB\n",   (unsigned)(ESP.getFreeHeap()      / 1024));
-    Serial.flush();
-
-    Serial.println("[1/4] display_init ...");  Serial.flush();
+    wlog("[1/4] display_init");
     display_init();
-    Serial.println("[1/4] display_init OK");   Serial.flush();
+    wlog("[1/4] display OK");
 
-    Serial.println("[2/4] storage_init ...");  Serial.flush();
+    wlog("[2/4] storage_init");
     storage_init();
-    sd_init();                                 // SD card (optional — boots without it)
-    Serial.println("[2/4] storage OK");        Serial.flush();
+    sd_init();
+    wlog("[2/4] storage OK");
 
-    Serial.println("[3/4] screen pages ...");  Serial.flush();
-    mgr.addPage(&screenCube);
-    mgr.addPage(&screenVehicle);
-    mgr.addPage(&screenGPS);
-    Serial.println("[3/4] pages registered"); Serial.flush();
+    wlog("[3/4] gps_init");
+    gps_init();
+    wlog("[3/4] GPS OK");
 
-    Serial.println("[4/4] ScreenManager::begin ...");  Serial.flush();
+    wlog("[4/4] screen pages");
+    mgr.addPage(&screenDash);     // 1 — Dashboard (dials)
+    mgr.addPage(&screenVehicle);  // 2 — Engine / fuel table
+    mgr.addPage(&screenGPS);      // 3 — GPS
+    mgr.addPage(&screenCube);     // 4 — Rotating cube demo
     mgr.begin();
-    Serial.println("[4/4] ScreenManager OK");          Serial.flush();
+    wlog("[4/4] ScreenManager OK");
 
-    Serial.println("=== boot complete ===");
+    wlog("=== boot complete  heap %u KB ===",
+         (unsigned)(ESP.getFreeHeap() / 1024));
 }
 
 static uint32_t _lastHeartbeat = 0;
 
 void loop()
 {
+    wifi_log_update();
+    ota_update();
+    gps_update();
+    sim_update();     // overrides vdata when SIM_ENABLE 1; compiles away when 0
     mgr.update();
 
-    if (millis() - _lastHeartbeat > 5000) {
+    if (millis() - _lastHeartbeat > 30000) {
         _lastHeartbeat = millis();
-        Serial.printf("[heartbeat] heap=%u KB  psram=%u KB\n",
-            (unsigned)(ESP.getFreeHeap()  / 1024),
-            (unsigned)(ESP.getFreePsram() / 1024));
+        wlog("[heartbeat] heap %u KB",
+             (unsigned)(ESP.getFreeHeap() / 1024));
     }
 }
