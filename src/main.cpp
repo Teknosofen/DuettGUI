@@ -6,9 +6,7 @@
 void setup()
 {
     Serial.begin(115200);
-    uint32_t t0 = millis();
-    while (!Serial && millis() - t0 < 5000) delay(50);
-
+    delay(3000);  // let UART settle before printing
     Serial.println("\n=== DuettGUI boot ===");
     Serial.printf("CPU  : %u MHz\n",  getCpuFrequencyMhz());
     Serial.printf("Flash: %u KB\n",   (unsigned)(ESP.getFlashChipSize() / 1024));

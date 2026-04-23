@@ -5,6 +5,7 @@
 //  Board  : Elecrow CrowPanel ESP32 HMI 5.0" (DIS07050H)
 //  Display: ILI6122 + ILI5960  –  800 x 480  RGB-16bit parallel
 //  Touch  : GT911  –  I2C (SDA=GPIO19, SCL=GPIO20)
+//  Source : Official Elecrow Arduino Tutorial (elecrow.com wiki)
 // ============================================================
 
 #define LGFX_USE_V1
@@ -16,6 +17,7 @@ class LGFX : public lgfx::LGFX_Device
 {
     lgfx::Panel_RGB   _panel_instance;
     lgfx::Bus_RGB     _bus_instance;
+    lgfx::Light_PWM   _light_instance;
     lgfx::Touch_GT911 _touch_instance;
 
 public:
@@ -55,22 +57,23 @@ public:
             cfg.pin_hsync   = GPIO_NUM_39;
             cfg.pin_pclk    = GPIO_NUM_0;
 
-            // Pixel clock – 12 MHz is safe; raise to 14–16 MHz if stable
-            cfg.freq_write = 12000000;
+            cfg.freq_write = 15000000;  // 15 MHz (official Elecrow setting)
 
-            // Horizontal timing (pixels)
+            // Horizontal timing (pixels) — from official Elecrow config
             cfg.hsync_polarity    = 0;
             cfg.hsync_front_porch = 8;
             cfg.hsync_pulse_width = 4;
-            cfg.hsync_back_porch  = 16;
+            cfg.hsync_back_porch  = 43;
 
-            // Vertical timing (lines)
+            // Vertical timing (lines) — from official Elecrow config
             cfg.vsync_polarity    = 0;
-            cfg.vsync_front_porch = 4;
+            cfg.vsync_front_porch = 8;
             cfg.vsync_pulse_width = 4;
-            cfg.vsync_back_porch  = 16;
+            cfg.vsync_back_porch  = 12;
 
-            cfg.pclk_idle_high    = 1;
+            cfg.pclk_active_neg = 1;  // pixel latched on falling edge
+            cfg.de_idle_high    = 0;
+            cfg.pclk_idle_high  = 0;
 
             _bus_instance.config(cfg);
             _panel_instance.setBus(&_bus_instance);
@@ -90,6 +93,19 @@ public:
             _panel_instance.config(cfg);
         }
 
+        // ---- Backlight (GPIO 2, PWM) ----------------------------------------
+        {
+            auto cfg = _light_instance.config();
+
+            cfg.pin_bl      = GPIO_NUM_2;
+            cfg.invert      = false;
+            cfg.freq        = 44100;
+            cfg.pwm_channel = 7;
+
+            _light_instance.config(cfg);
+            _panel_instance.setLight(&_light_instance);
+        }
+
         // ---- GT911 touch ---------------------------------------------------
         {
             auto cfg = _touch_instance.config();
@@ -98,12 +114,12 @@ public:
             cfg.x_max        = 799;
             cfg.y_min        = 0;
             cfg.y_max        = 479;
-            cfg.pin_int      = GPIO_NUM_NC;  // INT not connected
+            cfg.pin_int      = GPIO_NUM_NC;
             cfg.bus_shared   = false;
             cfg.offset_rotation = 0;
 
             cfg.i2c_port = 0;
-            cfg.i2c_addr = 0x5D;            // GT911: 0x5D or 0x14
+            cfg.i2c_addr = 0x5D;
             cfg.pin_sda  = GPIO_NUM_19;
             cfg.pin_scl  = GPIO_NUM_20;
             cfg.freq     = 400000;

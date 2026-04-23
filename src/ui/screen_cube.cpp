@@ -3,7 +3,13 @@
 #include <Arduino.h>
 #include <math.h>
 
-static lgfx::LGFX_Sprite* canvas = nullptr;  // allocated in screen_cube_init()
+// Sprite sized to fit in internal heap (300×300×2 = 175 KB; heap ≈ 348 KB free)
+static const int SPRITE_W = 300;
+static const int SPRITE_H = 300;
+static const int SPRITE_X = (800 - SPRITE_W) / 2;  // centred on 800-wide display
+static const int SPRITE_Y = (480 - SPRITE_H) / 2;
+
+static lgfx::LGFX_Sprite* canvas = nullptr;
 
 static const float V[8][3] = {
     {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
@@ -16,7 +22,8 @@ static const uint8_t E[12][2] = {
 };
 
 static float ang_x = 0.4f, ang_y = 0.0f;
-static float pos_x = 400.0f, pos_y = 240.0f;
+static float pos_x = SPRITE_W / 2.0f;
+static float pos_y = SPRITE_H / 2.0f;
 
 static void rotXY(float ix, float iy, float iz, float rx, float ry,
                   float &ox, float &oy, float &oz)
@@ -30,7 +37,8 @@ static void rotXY(float ix, float iy, float iz, float rx, float ry,
 
 static void project(float x, float y, float z, int &px, int &py)
 {
-    const float FOV = 260.0f, ZDIST = 3.5f;
+    // FOV=180, ZDIST=5 → cube vertices project ≈ ±95 px from centre — fits in 300×300
+    const float FOV = 180.0f, ZDIST = 5.0f;
     float s = FOV / (z + ZDIST);
     px = (int)(x * s + pos_x);
     py = (int)(y * s + pos_y);
@@ -38,21 +46,22 @@ static void project(float x, float y, float z, int &px, int &py)
 
 void screen_cube_init()
 {
-    size_t needed = (size_t)display->width() * display->height() * 2;
-    Serial.printf("  sprite needs %u KB, PSRAM free %u KB, heap free %u KB\n",
+    display->fillScreen(TFT_BLACK);  // clear border area around sprite once
+
+    size_t needed = (size_t)SPRITE_W * SPRITE_H * 2;
+    Serial.printf("  sprite needs %u KB, heap free %u KB\n",
         (unsigned)(needed / 1024),
-        (unsigned)(ESP.getFreePsram() / 1024),
-        (unsigned)(ESP.getFreeHeap()  / 1024));
+        (unsigned)(ESP.getFreeHeap() / 1024));
     Serial.flush();
 
     canvas = new lgfx::LGFX_Sprite(display);
     canvas->setColorDepth(16);
-    void* ptr = canvas->createSprite(display->width(), display->height());
+    void* ptr = canvas->createSprite(SPRITE_W, SPRITE_H);
 
     if (ptr) {
         Serial.println("  sprite OK (double-buffered)");
     } else {
-        Serial.println("  sprite FAILED — will draw directly (expect flicker)");
+        Serial.println("  sprite FAILED — drawing directly (expect flicker)");
         delete canvas;
         canvas = nullptr;
     }
@@ -65,8 +74,9 @@ void screen_cube_update()
 
     int32_t tx, ty;
     if (display->getTouch(&tx, &ty)) {
-        pos_x = (float)tx;
-        pos_y = (float)ty;
+        // Map display touch coords into sprite-local coords
+        pos_x = constrain((float)(tx - SPRITE_X), 20.0f, (float)(SPRITE_W - 20));
+        pos_y = constrain((float)(ty - SPRITE_Y), 20.0f, (float)(SPRITE_H - 20));
     }
 
     ang_x += 0.018f;
@@ -97,9 +107,9 @@ void screen_cube_update()
     target->setTextColor(target->color888(80, 80, 80), TFT_BLACK);
     target->setTextSize(1);
     target->setCursor(5, 5);
-    target->print(canvas ? "Touch: move cube" : "Touch: move cube (no PSRAM)");
+    target->print("Touch: move cube");
 
-    if (canvas) canvas->pushSprite(0, 0);
+    if (canvas) canvas->pushSprite(SPRITE_X, SPRITE_Y);
 
     int dt = (int)(millis() - t0);
     if (dt < 16) delay(16 - dt);
