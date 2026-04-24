@@ -30,7 +30,9 @@ void ScreenManager::begin()
 
 void ScreenManager::update()
 {
-    // ── Touch with debounce ─────────────────────────────────────────────────
+    uint32_t now = millis();
+
+    // ── Touch — runs every loop() iteration for crisp response ─────────────
     int32_t tx, ty;
     bool touching = display->getTouch(&tx, &ty);
     bool risingEdge = touching && !_touchActive;
@@ -40,19 +42,21 @@ void ScreenManager::update()
         if (ty < (int32_t)_contentH) {
             // Content area: fire every frame so drag (e.g. cube) stays smooth
             _pages[_current]->onTouch((uint16_t)tx, (uint16_t)ty);
-        } else if (risingEdge && (millis() - _lastNavMs) >= NAV_COOLDOWN_MS) {
+        } else if (risingEdge && (now - _lastNavMs) >= NAV_COOLDOWN_MS) {
             // Nav bar: rising edge AND cooldown elapsed since last page switch
             if (tx < 160 && _current > 0) {
-                _lastNavMs = millis();
+                _lastNavMs = now;
                 goTo(_current - 1);
             } else if (tx >= 640 && _current < _count - 1) {
-                _lastNavMs = millis();
+                _lastNavMs = now;
                 goTo(_current + 1);
             }
         }
     }
 
-    // ── Render ──────────────────────────────────────────────────────────────
+    // ── Render — throttled to RENDER_INTERVAL_MS ────────────────────────────
+    if (now - _lastRenderMs < RENDER_INTERVAL_MS) return;
+    _lastRenderMs = now;
     lgfx::LovyanGFX& target = _hasSprite
         ? static_cast<lgfx::LovyanGFX&>(*_sprite)
         : static_cast<lgfx::LovyanGFX&>(*display);
@@ -86,10 +90,10 @@ void ScreenManager::tryAllocSprite()
 
     if (ptr) {
         _hasSprite = true;
-        Serial.printf("[mgr] content sprite OK  %u × %u  (%u KB)\n",
-            _contentW, _contentH, (unsigned)(bytes / 1024));
+        wlog("[mgr] content sprite OK  %u x %u  (%u KB)",
+             _contentW, _contentH, (unsigned)(bytes / 1024));
     } else {
-        Serial.println("[mgr] content sprite FAILED — pages draw directly");
+        wlog("[mgr] content sprite FAILED — pages draw directly");
         delete _sprite;
         _sprite    = nullptr;
         _hasSprite = false;

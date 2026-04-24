@@ -4,7 +4,12 @@
 
 // Minimum time between nav-bar page switches (ms).
 // Raise if double-tap still occurs; lower for snappier response.
-#define NAV_COOLDOWN_MS  250
+#define NAV_COOLDOWN_MS   250
+
+// Target frame period for screen rendering (ms).
+// Touch polling still runs every loop() iteration for crisp response.
+// 100 ms = 10 Hz; 200 ms = 5 Hz.
+#define RENDER_INTERVAL_MS 100
 
 // Owns all pages, handles touch routing and the fixed navigation bar.
 //
@@ -40,9 +45,10 @@ private:
 
     lgfx::LGFX_Sprite* _sprite       = nullptr;
     bool                _hasSprite   = false;
-    bool                _touchActive = false;   // finger currently on screen
-    uint32_t            _lastNavMs   = 0;       // millis() of last nav action
-    bool                _navDirty    = true;    // nav bar needs a redraw
+    bool                _touchActive  = false;  // finger currently on screen
+    uint32_t            _lastNavMs    = 0;      // millis() of last nav action
+    uint32_t            _lastRenderMs = 0;      // millis() of last render
+    bool                _navDirty     = true;   // nav bar needs a redraw
 
     void tryAllocSprite();
     void goTo(int index);

@@ -229,8 +229,8 @@ protected:
 ```
 
 - `init()` — called once on first activation; allocate sprites here.
-- `update()` — called every frame; `gfx` is either a manager-level sprite or the display directly.
-- `onTouch()` — coordinates are relative to the content area top-left.
+- `update()` — called at the render rate (`RENDER_INTERVAL_MS`); `gfx` is either a manager-level sprite or the display directly.
+- `onTouch()` — called every `loop()` iteration while a finger is in the content area; coordinates are relative to the content area top-left.
 
 #### `_needsRedraw` lifecycle
 
@@ -264,18 +264,32 @@ void begin();              // call after display_init()
 void update();             // call every loop() iteration
 ```
 
-On `update()`: polls touch → routes to page or nav bar → calls `page->update()` → draws nav bar on top. Pages are lazy-initialised (init() on first visit).
+Each `update()` call is split into two phases with independent rates:
 
-Attempts to allocate a full content-area sprite (800×432, ~675 KB) for flicker-free rendering. Falls back to direct draw if the allocation fails.
+| Phase | Rate | Purpose |
+|---|---|---|
+| Touch polling | Every `loop()` call (full speed) | Instant tap/swipe response |
+| Render | `RENDER_INTERVAL_MS` (default 100 ms = 10 Hz) | Page drawing, sprite push, nav bar |
+
+Pages are lazy-initialised (`init()` on first visit). Attempts to allocate a full content-area sprite (800×432, ~675 KB) for flicker-free rendering; falls back to direct draw if allocation fails.
+
+#### Render rate
+
+`RENDER_INTERVAL_MS` is defined in `screen_manager.h`. At 100 ms (10 Hz):
+- Dashboard dials and numbers update smoothly (≤ ~2 km/h step per frame with the simulator)
+- WiFi, OTA, and GPS processing get more CPU time because `loop()` returns quickly on non-render iterations
+- `ScreenCube` animates at 10 fps — visible steps, but it is a demo page
+
+Decrease toward 40 ms (25 Hz) if animation needs to be smoother; increase toward 200 ms (5 Hz) to further reduce draw work.
 
 #### Touch debounce
 
 Raw GT911 touch events are asserted for many consecutive frames. Two guards prevent accidental double-navigation:
 
-1. **Rising-edge detection** — `_touchActive` tracks whether a finger was already down last frame. Navigation fires only on the first frame of a new touch (`risingEdge = touching && !_touchActive`).
+1. **Rising-edge detection** — `_touchActive` tracks whether a finger was already down last call. Navigation fires only on the first call of a new touch (`risingEdge = touching && !_touchActive`).
 2. **Time cooldown** — `NAV_COOLDOWN_MS` (defined in `screen_manager.h`) is the minimum milliseconds between page switches. Increase it if double-tap still occurs; decrease it for snappier response.
 
-Content-area touches (`ty < contentH`) are forwarded to the active page every frame so continuous drags (e.g. moving the cube) remain smooth.
+Content-area touches (`ty < contentH`) are forwarded to the active page on every `loop()` call so drags remain smooth regardless of render throttling.
 
 #### Nav bar render budget (`_navDirty`)
 
@@ -379,16 +393,27 @@ Three `updateExtra()` cells stacked vertically, redrawn only when label or value
 
 Fuel label switches automatically: `L/100km` when GPS fix is valid and speed > 2 km/h, otherwise `L/h`.
 
-#### Arc update gating
+#### Arc rendering — delta-sector update
 
-To minimise flicker on a direct-draw display, the coloured arc is redrawn only when **both** conditions hold:
+The arc is redrawn using an incremental strategy to eliminate flicker. The old approach (erase the entire 270° gray track, paint the colored arc on top) caused a visible gray flash on every update. The new approach paints only the sector that changed:
+
+| Condition | Action |
+|---|---|
+| First draw after page entry (`prevVal < 0`) | Full redraw: gray track + colored arc + all ticks |
+| Color zone changed (crossed warn/red threshold) | Full redraw (rare event) |
+| Value increased | `fillArc(prevAngle → newAngle, color)` + redraw ticks in that sliver only |
+| Value decreased | `fillArc(newAngle → prevAngle, gray)` + redraw ticks in that sliver only |
+
+`drawTicksInRange()` filters the tick loop to only the affected angular sector, so a typical frame draws 0–2 tick lines instead of all 27.
+
+The arc is also gated on a minimum angle change before any redraw is attempted:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `ARC_THRESHOLD` | 1.0° | Minimum arc angle change required |
-| `ARC_MIN_MS` | 40 ms | Minimum time between redraws (≈ 25 fps cap) |
+| `ARC_THRESHOLD` | 1.0° | Minimum arc angle change before redraw |
+| `ARC_MIN_MS` | 40 ms | Floor on arc redraw interval (superseded in practice by `RENDER_INTERVAL_MS`) |
 
-The centre number is updated independently — redrawn only when the formatted integer string changes (no timer gate needed for text).
+The centre number is updated independently — redrawn only when the formatted integer string changes.
 
 ---
 

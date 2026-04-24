@@ -111,42 +111,76 @@ void ScreenDash::drawStaticDial(lgfx::LovyanGFX& gfx, int cx, int cy,
     }
 }
 
-// ── Arc + tick lines (drawn when value changes) ──────────────────────────────
+// ── Tick lines within a value range ─────────────────────────────────────────
 
-void ScreenDash::drawArc(lgfx::LovyanGFX& gfx, int cx, int cy,
-                          float val, float maxV,
-                          float majorStep, float minorStep,
-                          float warnFrac, float redFrac,
-                          uint32_t normalCol) const
+void ScreenDash::drawTicksInRange(lgfx::LovyanGFX& gfx, int cx, int cy,
+                                   float vLo, float vHi, float maxV,
+                                   float majorStep, float minorStep) const
 {
     const int TRACK_OUT = _R - 1;
-    const int TRACK_IN  = _R - 21;
     const int MAJ_IN    = _R - 20;
     const int MIN_IN    = _R - 11;
-
-    // 1. Background track using fillArc (ARC_START convention = 3-o'clock base)
-    gfx.fillArc(cx, cy, TRACK_IN, TRACK_OUT,
-                ARC_START, ARC_START + DIAL_SWEEP,
-                gfx.color888(0x22, 0x22, 0x22));
-
-    // 2. Value arc
-    if (val > 0.f) {
-        uint32_t col = arcRGB(val, maxV, warnFrac, redFrac, normalCol);
-        gfx.fillArc(cx, cy, TRACK_IN, TRACK_OUT,
-                    ARC_START, valToArcAngle(val, maxV),
-                    rgb(gfx, col));
-    }
-
-    // 3. Tick lines redrawn on top using ptAt (12-o'clock convention)
+    float aLo = valToAngle(vLo, maxV);
+    float aHi = valToAngle(vHi, maxV);
     for (float v = 0; v <= maxV + 0.01f; v += minorStep) {
         float angle = valToAngle(v, maxV);
-        bool  major = fmodf(v + 0.01f, majorStep) < 0.02f;
+        if (angle < aLo - 0.5f || angle > aHi + 0.5f) continue;
+        bool major = fmodf(v + 0.01f, majorStep) < 0.02f;
         int x0, y0, x1, y1;
         ptAt(cx, cy, TRACK_OUT,              angle, x0, y0);
         ptAt(cx, cy, major ? MAJ_IN : MIN_IN, angle, x1, y1);
         gfx.drawLine(x0, y0, x1, y1,
                      major ? gfx.color888(0xC8, 0xC8, 0xC8)
                            : gfx.color888(0x52, 0x52, 0x52));
+    }
+}
+
+// ── Arc + tick lines (delta-sector update to eliminate flicker) ──────────────
+//
+// Full redraw (gray track + colored arc + all ticks) is done only on:
+//   - first draw after page entry (prevVal < 0)
+//   - color zone change (value crosses warn/red threshold)
+// All other frames paint only the sector that changed:
+//   - value grew  → fill new segment with color, redraw ticks on top
+//   - value shrank → fill vacated segment with gray, redraw ticks on top
+
+void ScreenDash::drawArc(lgfx::LovyanGFX& gfx, int cx, int cy,
+                          float val, float prevVal, float maxV,
+                          float majorStep, float minorStep,
+                          float warnFrac, float redFrac,
+                          uint32_t normalCol) const
+{
+    const int TRACK_OUT = _R - 1;
+    const int TRACK_IN  = _R - 21;
+
+    uint32_t col     = arcRGB(val,     maxV, warnFrac, redFrac, normalCol);
+    bool fullRedraw  = (prevVal < 0.f) ||
+                       (col != arcRGB(prevVal, maxV, warnFrac, redFrac, normalCol));
+
+    if (fullRedraw) {
+        gfx.fillArc(cx, cy, TRACK_IN, TRACK_OUT,
+                    ARC_START, ARC_START + DIAL_SWEEP,
+                    gfx.color888(0x22, 0x22, 0x22));
+        if (val > 0.f) {
+            gfx.fillArc(cx, cy, TRACK_IN, TRACK_OUT,
+                        ARC_START, valToArcAngle(val, maxV),
+                        rgb(gfx, col));
+        }
+        drawTicksInRange(gfx, cx, cy, 0.f, maxV, maxV, majorStep, minorStep);
+
+    } else if (val > prevVal) {
+        // Grew: fill new segment with color, redraw ticks on top.
+        gfx.fillArc(cx, cy, TRACK_IN, TRACK_OUT,
+                    valToArcAngle(prevVal, maxV), valToArcAngle(val, maxV),
+                    rgb(gfx, col));
+        drawTicksInRange(gfx, cx, cy, prevVal, val, maxV, majorStep, minorStep);
+
+    } else {
+        // Shrank: erase vacated segment to gray, redraw ticks on top.
+        gfx.fillArc(cx, cy, TRACK_IN, TRACK_OUT,
+                    valToArcAngle(val, maxV), valToArcAngle(prevVal, maxV),
+                    gfx.color888(0x22, 0x22, 0x22));
+        drawTicksInRange(gfx, cx, cy, val, prevVal, maxV, majorStep, minorStep);
     }
 }
 
@@ -229,6 +263,7 @@ void ScreenDash::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t conten
         // Invalidate all change-detection state
         _prevSpeedAngle = _prevRpmAngle = -999.f;
         _lastSpeedDrawMs = _lastRpmDrawMs = 0;
+        _prevSpeedVal = _prevRpmVal = -1.f;
         _fmtSpeedNum[0] = _fmtRpmNum[0] = '\0';
         _fmtThrottle[0] = _fmtFuel[0] = _fmtMap[0] = '\0';
         _needsRedraw = false;
@@ -242,8 +277,9 @@ void ScreenDash::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t conten
         if (fabsf(angle - _prevSpeedAngle) >= ARC_THRESHOLD &&
             (now - _lastSpeedDrawMs) >= ARC_MIN_MS) {
             drawArc(gfx, _sCX, _sCY,
-                    vdata.speed_kmh, 140.f, 20.f, 10.f,
+                    vdata.speed_kmh, _prevSpeedVal, 140.f, 20.f, 10.f,
                     0.72f, 0.86f, 0x00BFFF);
+            _prevSpeedVal    = vdata.speed_kmh;
             _prevSpeedAngle  = angle;
             _lastSpeedDrawMs = now;
         }
@@ -261,8 +297,9 @@ void ScreenDash::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t conten
         if (fabsf(angle - _prevRpmAngle) >= ARC_THRESHOLD &&
             (now - _lastRpmDrawMs) >= ARC_MIN_MS) {
             drawArc(gfx, _rCX, _rCY,
-                    vdata.rpm, 6000.f, 1000.f, 500.f,
+                    vdata.rpm, _prevRpmVal, 6000.f, 1000.f, 500.f,
                     0.75f, 0.92f, 0x00FF88);
+            _prevRpmVal    = vdata.rpm;
             _prevRpmAngle  = angle;
             _lastRpmDrawMs = now;
         }

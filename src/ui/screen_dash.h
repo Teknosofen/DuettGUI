@@ -22,6 +22,11 @@ private:
     uint32_t _lastSpeedDrawMs = 0;
     uint32_t _lastRpmDrawMs   = 0;
 
+    // Previous values for incremental (delta-sector) arc updates.
+    // -1 signals "no previous draw" and forces a full redraw.
+    float _prevSpeedVal = -1.f;
+    float _prevRpmVal   = -1.f;
+
     // Centre number: redrawn only when the formatted string changes.
     char _fmtSpeedNum[8]  = {};
     char _fmtRpmNum[8]    = {};
@@ -35,11 +40,17 @@ private:
                         float maxV, float majorStep, float minorStep,
                         bool kiloLabels) const;
 
+    // prevVal < 0 forces a full redraw; otherwise only the delta sector is painted.
     void drawArc(lgfx::LovyanGFX& gfx, int cx, int cy,
-                 float val, float maxV,
+                 float val, float prevVal, float maxV,
                  float majorStep, float minorStep,
                  float warnFrac, float redFrac,
                  uint32_t normalCol) const;
+
+    // Redraws tick lines whose angle falls within [vLo, vHi].
+    void drawTicksInRange(lgfx::LovyanGFX& gfx, int cx, int cy,
+                          float vLo, float vHi, float maxV,
+                          float majorStep, float minorStep) const;
 
     void drawNumber(lgfx::LovyanGFX& gfx, int cx, int cy,
                     float val, const char* unit) const;
