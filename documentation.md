@@ -104,20 +104,22 @@ upload_flags    = --auth=duett1964
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        ScreenManager                             │
-│     touch polling · page switching · nav bar                     │
-├───────────┬──────────────┬───────────┬───────────┬──────────────┤
-│ Screen    │ Screen       │ Screen    │ Screen    │ Screen · · · │
-│ Dash      │ Vehicle      │ GPS       │ Cube      │ (future)     │
-├───────────┴──────────────┴───────────┴───────────┴──────────────┤
-│             Widget  (dataRow · hRule · sectionLabel)             │
-├──────────────────────────────────────────────────────────────────┤
-│                         VehicleData                              │
-│   shared struct — updated by GPS reader and/or sim_update()      │
-├──────────────────────────────────────────────────────────────────┤
-│              display.h / LovyanGFX / RGB LCD panel               │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                          ScreenManager                               │
+│       touch polling · page switching · nav bar                       │
+├──────────┬───────────┬───────────┬───────────┬──────────────────────┤
+│ Screen   │ Screen    │ Screen    │ Screen    │ Screen               │
+│ Dash     │ Vehicle   │ GPS       │ Storage   │ Cube                 │
+├──────────┴───────────┴───────────┴───────────┴──────────────────────┤
+│         Widget  (dataRow · hRule · vRule · sectionLabel)             │
+├──────────────────────────────────────────────────────────────────────┤
+│                           VehicleData                                │
+│     shared struct — updated by GPS reader and/or sim_update()        │
+├──────────────────────────────────────────────────────────────────────┤
+│       Logger  (CSV on SD · sequence counter on LittleFS)             │
+├──────────────────────────────────────────────────────────────────────┤
+│               display.h / LovyanGFX / RGB LCD panel                  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Screen layout
@@ -145,10 +147,12 @@ src/
 ├── main.cpp                    — setup() · loop() · page registration
 │
 ├── data/
-│   ├── vehicle_data.h          — VehicleData struct (all sensor values)
+│   ├── vehicle_data.h          — VehicleData struct (all sensor values + timestamp)
 │   ├── vehicle_data.cpp        — global vdata instance
 │   ├── sim.h                   — SIM_ENABLE #define toggle
-│   └── sim.cpp                 — synthetic drive-cycle (compiles away when SIM_ENABLE 0)
+│   ├── sim.cpp                 — synthetic drive-cycle (compiles away when SIM_ENABLE 0)
+│   ├── logger.h                — logger_init/update/enable/query API
+│   └── logger.cpp              — CSV logger: LittleFS sequence counter + SD file I/O
 │
 ├── display/
 │   ├── display.h               — extern LGFX* display
@@ -156,7 +160,7 @@ src/
 │
 ├── sensors/
 │   ├── gps_reader.h            — gps_init() · gps_update()
-│   └── gps_reader.cpp          — Adafruit_GPS on UART0, populates vdata
+│   └── gps_reader.cpp          — Adafruit_GPS on UART0, populates vdata + timestamp
 │
 ├── net/
 │   ├── wifi_log.h              — wlog() declaration + WIFI_LOG_SSID / PASS
@@ -168,8 +172,9 @@ src/
 │   ├── screen.h                — abstract Screen base class
 │   ├── screen_manager.h/.cpp   — page registry · touch routing · nav bar
 │   ├── screen_dash.h/.cpp      — Dashboard: speed + RPM dials with extras
-│   ├── screen_vehicle.h/.cpp   — engine / fuel sensor readout
+│   ├── screen_vehicle.h/.cpp   — two-column engine / fuel readout
 │   ├── screen_gps.h/.cpp       — GPS speed · heading · position
+│   ├── screen_storage.h/.cpp   — SD status · logging toggle · file info
 │   ├── screen_cube.h/.cpp      — rotating wireframe cube demo
 │   └── widgets.h/.cpp          — shared stateless drawing helpers
 │
@@ -206,6 +211,7 @@ Single global struct `vdata` shared by all pages. Sensor reader classes update i
 | `lat` / `lon` | `double` | GPS position |
 | `altitude_m` | `float` | GPS altitude |
 | `gps_valid` | `bool` | GPS fix acquired |
+| `timestamp[24]` | `char[]` | ISO-8601 string when GPS fix valid (`"2025-06-01T12:34:56"`); `"T+Xs"` from `millis()/1000` otherwise |
 
 ---
 
@@ -295,22 +301,58 @@ Content-area touches (`ty < contentH`) are forwarded to the active page on every
 
 `drawNavBar()` is called only when `_navDirty` is true **or** the page just did a full-screen clear (detected via `needsFullRedraw()` polled before `update()`). In steady state — no page switch, no full redraw — the nav bar is never touched, which eliminates its flicker during animation.
 
+The page name and page counter are rendered in **DejaVu18**, vertically centred in the 48 px nav bar using `fontHeight()` for precise placement.
+
+---
+
+### Typography
+
+All text is rendered with LovyanGFX's built-in **DejaVu anti-aliased fonts**. These are stored as pre-rendered glyph bitmaps with proper anti-aliasing — a large improvement over the default 6×8 bitmap font scaled with `setTextSize()`.
+
+| Font constant | Approx. height | Used for |
+|---|---|---|
+| `lgfx::fonts::DejaVu9` | 9 px | Small hints (e.g. "x1000 rpm", cube label) |
+| `lgfx::fonts::DejaVu12` | 12 px | Extra-cell labels (Throttle [%], MAP [kPa] …) |
+| `lgfx::fonts::DejaVu18` | 18 px | Page headers, labels, units, nav bar, section headings |
+| `lgfx::fonts::DejaVu24` | 24 px | GPS coordinate lines, GPS unit labels |
+| `lgfx::fonts::DejaVu40` | 40 px | Dashboard dial numbers, vehicle data values |
+| `lgfx::fonts::DejaVu56` | 56 px | GPS large speed display |
+
+Always call `gfx.setTextSize(1)` after `gfx.setFont(...)` — the size multiplier still applies and must be 1 when using named fonts.
+
+Every drawing function that uses `setTextSize()` sets its own font first, so there is no implicit dependency on font state left by a previous page or call. Proportional fonts (all DejaVu fonts) have variable character widths; text-area clears must use the **maximum possible** string width, not the current one, to avoid ghost digits when a longer number is replaced by a shorter one. `drawNumber()` achieves this by pre-measuring the formatted `maxVal` string.
+
 ---
 
 ### `Widget` namespace  (`src/ui/widgets.h`)
 
-Stateless helpers; all functions take `lgfx::LovyanGFX& gfx` so they work on any render target.
+Stateless helpers; all functions take `lgfx::LovyanGFX& gfx` so they work on any render target. Each function sets its own font so it is safe to call from any page regardless of prior font state.
 
-| Function | Description |
-|---|---|
-| `Widget::dataRow(gfx, y, label, value, unit, color)` | Label left / value right-aligned / unit; standard row height 80 px |
-| `Widget::updateRowValue(gfx, rowY, stored, sz, newVal, color)` | Partial update: erases value cell and redraws only if `newVal` differs from `stored`; updates `stored` in place |
-| `Widget::hRule(gfx, y, w)` | Thin horizontal separator line |
-| `Widget::sectionLabel(gfx, x, y, text)` | Small gray heading |
+The two-column layout is supported via the `col` parameter (`0` = left, `1` = right). Column x-offset is `col × COL_W` where `COL_W = 400 px`.
+
+| Function | Font | Description |
+|---|---|---|
+| `Widget::dataRow(gfx, y, label, value, unit, color, col)` | Label/unit: DejaVu18 · Value: DejaVu40 | Full data row; row height `ROW_H = 80 px`. Label at `dx+20`, value right-aligned to `dx+360`, unit at `dx+368`. |
+| `Widget::updateRowValue(gfx, rowY, stored, sz, newVal, color, col)` | DejaVu40 | Partial update: erases value area (`dx+190`, width 175) and redraws only if `newVal` differs. |
+| `Widget::hRule(gfx, y, w)` | — | Thin horizontal separator spanning `w − 40` px. |
+| `Widget::vRule(gfx, x, h)` | — | Thin vertical separator at `x`, from y=10 to y=h−10. Used as the column divider. |
+| `Widget::sectionLabel(gfx, x, y, text)` | DejaVu18 | Small gray section heading. |
 
 ---
 
 ## Pages
+
+### Page order
+
+| # | Screen | Name |
+|---|---|---|
+| 1 | `ScreenDash` | Dashboard |
+| 2 | `ScreenVehicle` | Vehicle |
+| 3 | `ScreenGPS` | GPS |
+| 4 | `ScreenStorage` | Storage |
+| 5 | `ScreenCube` | Cube Demo |
+
+---
 
 ### ScreenDash  —  `"Dashboard"` (page 1)
 
@@ -413,11 +455,49 @@ The arc is also gated on a minimum angle change before any redraw is attempted:
 | `ARC_THRESHOLD` | 1.0° | Minimum arc angle change before redraw |
 | `ARC_MIN_MS` | 40 ms | Floor on arc redraw interval (superseded in practice by `RENDER_INTERVAL_MS`) |
 
-The centre number is updated independently — redrawn only when the formatted integer string changes.
+The centre number (`drawNumber`) uses **DejaVu40** for the value and **DejaVu18** for the unit, stacked vertically and centred on the dial centre using measured `fontHeight()`. The erase rectangle width is derived from the **maximum possible value** (`maxVal` passed by the caller) rather than the current value, so that a shorter number (e.g. "850") always fully erases a previously drawn wider number (e.g. "3500").
 
 ---
 
-### ScreenCube  —  `"Cube Demo"`
+### ScreenStorage  —  `"Storage"` (page 4)
+
+Shows SD card health, storage capacity, and logging controls on a single screen.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  SD Card                                                │  ← sectionLabel y=15
+│  ●  SD OK  512 MB                       (or No SD)      │  y=45
+│     Used: 12.4 MB                                       │  y=72
+├─────────────────────────────────────────────────────────┤  y=100
+│  Data Logging                                           │  y=118
+│  ┌──────────────────────────────────┐                   │
+│  │  ● LOGGING ON  (or ○ LOGGING OFF)│  toggle button    │  y=155
+│  └──────────────────────────────────┘                   │
+│  LOG_0003.CSV  (4.2 KB)                                 │  y=218
+│  1247 records                                           │  y=248
+└─────────────────────────────────────────────────────────┘
+```
+
+| Element | Detail |
+|---|---|
+| SD status dot | Green = card present and mounted; red = no card |
+| SD size string | Total capacity in KB / MB / GB from `sd_total_bytes()` |
+| Used string | `sd_used_bytes()` formatted as KB / MB / GB |
+| Toggle button | `BTN_X=280, BTN_Y=155, BTN_W=240, BTN_H=50` — green (ON) or gray (OFF) |
+| Log filename | `logger_filename()` — e.g. `LOG_0003.CSV` |
+| File size | `logger_file_bytes()` formatted to KB / MB |
+| Record count | `logger_records()` — rows written since last `logger_init()` |
+| Debounce | 400 ms between button presses |
+
+No sprite — draws directly on `gfx`.
+
+**Render strategy:** full render on `_needsRedraw`; partial update for button state (`_prevEnabled`), record count (`_prevRecords`), and SD presence (`_prevSdOk`) — only changed elements are erased and redrawn.
+
+**Touch:** `onTouch()` checks if the touch point falls inside the button rectangle and toggles logging via `logger_enable(bool)`.
+
+---
+
+### ScreenCube  —  `"Cube Demo"` (page 5)
 
 Rotating wireframe 3D cube, touch to move. Uses a 300×300 sprite (~175 KB internal heap) centred in the content area. Falls back to direct draw if allocation fails.
 
@@ -425,33 +505,45 @@ Projection: `scale = 180 / (z + 5)` → vertices project ≈ ±95 px from centre
 
 **Render strategy:** redraws everything every frame (clear → draw edges → push sprite). Sets `_needsRedraw = false` at the very start of `update()` so `ScreenManager` never sees a persistent "full redraw" signal and does not redraw the nav bar every frame.
 
-### ScreenVehicle  —  `"Vehicle"`
+### ScreenVehicle  —  `"Vehicle"` (page 2)
 
-Five `Widget::dataRow` rows centred vertically:
+Seven `Widget::dataRow` rows split across two columns, centred vertically in the 432 px content area.
 
-| Row | Source field | Colour |
-|---|---|---|
-| RPM | `vdata.rpm` | Green |
-| Throttle | `vdata.throttle_pct` | Cyan |
-| Inlet pressure | `vdata.map_kpa` | Orange |
-| Ambient pressure | `vdata.ambient_kpa` | Orange |
-| Fuel flow | `vdata.fuel_flow_lph` | Red |
+```
+┌──────────────────────────────┬──────────────────────────────┐
+│  Left column (col=0)         │  Right column (col=1)        │
+├──────────────────────────────┼──────────────────────────────┤
+│  RPM          [rpm]  green   │  Fuel flow    [L/h]  red     │
+│  Throttle     [%]    cyan    │  Economy   [L/100km] orange  │
+│  MAP          [kPa]  orange  │  Fuel used    [L]    orange  │
+│  Ambient      [kPa]  orange  │                              │
+└──────────────────────────────┴──────────────────────────────┘
+           x=400: vRule divider
+```
+
+| Parameter | Value |
+|---|---|
+| Column width (`COL_W`) | 400 px |
+| Row height (`ROW_H`) | 80 px |
+| Rows per column | 4 left / 3 right |
+| Vertical start (`_startY`) | `(contentH − 4 × ROW_H) / 2` |
+| Column divider | `Widget::vRule` at x = 400 |
 
 No sprite — draws directly on `gfx`.
 
-**Render strategy:** on `_needsRedraw` performs a full render (background + labels + units + values); on subsequent frames calls `Widget::updateRowValue()` for each row, which erases and redraws the value cell only when the formatted string changes.
+**Render strategy:** on `_needsRedraw` performs a full render (background + vRule divider + all labels, units, values); on subsequent frames calls `Widget::updateRowValue()` for each row, which erases and redraws the value cell only when the formatted string changes.
 
-### ScreenGPS  —  `"GPS"`
+### ScreenGPS  —  `"GPS"` (page 3)
 
 ```
 ┌──────────────────────┬──────────────────────────┐
 │  Speed               │  Heading                 │
-│  (size-7, green)     │  degrees + compass point │
-│  km/h                │  (cyan / amber)           │
+│  (DejaVu56, green)   │  degrees + compass point │
+│  km/h                │  (DejaVu40, cyan / amber) │
 ├──────────────────────┴──────────────────────────┤
-│  Latitude   DD° MM.MMMM' N/S                    │
-│  Longitude  DD° MM.MMMM' E/W                    │
-│  Altitude                                       │
+│  Latitude   DD° MM.MMMM' N/S   (DejaVu24)       │
+│  Longitude  DD° MM.MMMM' E/W   (DejaVu24)       │
+│  Altitude   NNN m              (DejaVu18)        │
 ├─────────────────────────────────────────────────┤
 │  L/100km (moving) or L/h (stationary)  ● fix   │
 └─────────────────────────────────────────────────┘
@@ -459,7 +551,7 @@ No sprite — draws directly on `gfx`.
 
 No sprite — draws directly on `gfx`.
 
-**Render strategy:** `drawStatic()` draws section labels, unit strings, dividers and separators once (called only when `_needsRedraw`). Dynamic fields (speed, heading, compass point, lat, lon, altitude, fuel, GPS dot) are updated each frame via `updateField()` / `updateFieldRight()` helpers that erase and redraw a field's bounding rectangle only when its formatted string value changes.
+**Render strategy:** `drawStatic()` draws section labels, unit strings, dividers and separators once (called only when `_needsRedraw`). Dynamic fields (speed, heading, compass point, lat, lon, altitude, fuel, GPS dot) are updated each frame via `updateField()` / `updateFieldRight()` helpers that erase and redraw a field's bounding rectangle only when its formatted string value changes. The erase height uses `max(hardcodedH, fontHeight())` so it always covers the full glyph even if the nominal height constant predates a font change.
 
 ---
 
@@ -511,6 +603,81 @@ Easing uses **smoothstep** (`t² × (3 − 2t)`) so the dials ease in and out ra
 | `lat` / `lon` | Fixed at Stockholm (59.3293° N, 18.0686° E) |
 | `altitude_m` | 28 m |
 | `heading_deg` | 45° |
+| `timestamp` | `"T+Xs"` from `millis()/1000` (no GPS hardware in sim) |
+
+---
+
+## Data Logging  (`src/data/logger.h/.cpp`)
+
+The logger writes one CSV row per second to an SD card file. It is enabled by default at boot (if an SD card is present) and can be toggled at runtime from the Storage page.
+
+### Sequence numbering
+
+A 16-bit sequence counter is stored in `/logseq.txt` on LittleFS. At every `logger_init()` call the counter is read, incremented, and written back, then the SD file is opened as `/LOG_NNNN.CSV` (zero-padded to 4 digits). Files are never overwritten between reboots even after a crash; the next boot creates a new file with the next sequence number.
+
+### Initialisation
+
+`logger_init()` is called in `setup()` after `sd_init()`. It:
+
+1. Reads `/logseq.txt` from LittleFS (creates it at 0 if absent).
+2. Writes `seq + 1` back to persist the new sequence number.
+3. Opens `/LOG_NNNN.CSV` on SD with `FILE_WRITE`.
+4. Writes the CSV header row.
+
+### API
+
+| Function | Description |
+|---|---|
+| `logger_init()` | Open next numbered CSV file and write header |
+| `logger_update()` | Write one row per `LOG_INTERVAL_MS`; call every `loop()` |
+| `logger_enable(bool)` | Pause / resume logging at runtime |
+| `logger_enabled()` | Returns current state |
+| `logger_sequence()` | Current file sequence number |
+| `logger_records()` | Rows written to current file |
+| `logger_filename()` | Current filename, e.g. `"LOG_0003.CSV"` |
+| `logger_file_bytes()` | Current file size in bytes |
+
+`LOG_INTERVAL_MS` is defined in `logger.h` (default: 1000 ms = 1 row/sec). The file is flushed to SD every 10 records to reduce wear while keeping data loss risk low.
+
+### CSV format
+
+```
+seq,timestamp,speed_kmh,rpm,throttle_pct,map_kpa,ambient_kpa,fuel_flow_lph,fuel_per_100km,fuel_used_l,gps_valid,lat,lon,altitude_m,heading_deg
+```
+
+| Column | Format | Source |
+|---|---|---|
+| `seq` | integer | Row number within the file |
+| `timestamp` | string | `vdata.timestamp` — see [Clock Synchronisation](#clock-synchronisation) |
+| `speed_kmh` | `%.1f` | `vdata.speed_kmh` |
+| `rpm` | `%.0f` | `vdata.rpm` |
+| `throttle_pct` | `%.1f` | `vdata.throttle_pct` |
+| `map_kpa` | `%.1f` | `vdata.map_kpa` |
+| `ambient_kpa` | `%.1f` | `vdata.ambient_kpa` |
+| `fuel_flow_lph` | `%.2f` | `vdata.fuel_flow_lph` |
+| `fuel_per_100km` | `%.1f` | `vdata.fuel_per_100km` |
+| `fuel_used_l` | `%.3f` | `vdata.fuel_used_l` |
+| `gps_valid` | `0` / `1` | `vdata.gps_valid` |
+| `lat` | `%.6lf` | `vdata.lat` |
+| `lon` | `%.6lf` | `vdata.lon` |
+| `altitude_m` | `%.1f` | `vdata.altitude_m` |
+| `heading_deg` | `%.1f` | `vdata.heading_deg` |
+
+---
+
+## Clock Synchronisation
+
+Accurate timestamps in log files require a time source. The options below are listed from most to least accurate.
+
+| Option | Accuracy | Status | Notes |
+|---|---|---|---|
+| **GPS time** (NMEA `$GPRMC`) | ±1 s | **Implemented** | Adafruit_GPS parses date/time from each NMEA sentence. Populated into `vdata.timestamp` as ISO-8601 once `GPS.fix && GPS.year > 0`. |
+| **Phone via HTTP POST** | ±1–2 s | Possible | Phone connects to the `DuettGUI` AP and POSTs the current epoch to an endpoint on the ESP. No extra hardware. Requires a small web handler and manual trigger from the phone each drive. |
+| **NTP** | ms-level | Not viable | The ESP32 is the AP — it is not a WiFi client, so it cannot reach an NTP server unless a phone acts as a bridge. |
+| **DS3231 RTC module** | ±2 min/year | Possible | Battery-backed hardware clock on I2C. Not fitted on this board. Would require adding hardware. |
+| **Time since boot** | relative | **Implemented (fallback)** | `vdata.timestamp` is set to `"T+Xs"` (`millis()/1000`) when GPS time is unavailable. Sufficient to correlate rows within one session. |
+
+The current implementation uses GPS time as the primary source and boot-relative time as the fallback. No additional hardware or network setup is required.
 
 ---
 
@@ -562,7 +729,7 @@ wlog("GPS fix lost");
 
 ## Storage
 
-### LittleFS  (internal flash, ~1.9 MB)
+### LittleFS  (internal flash, ~448 KB partition)
 
 ```cpp
 storage_init();
@@ -570,7 +737,7 @@ storage_write("/settings.json", jsonString);
 String s = storage_read("/settings.json");
 ```
 
-Use for persistent settings (calibration, preferences).
+Use for small persistent data: settings, calibration, and the logger sequence counter (`/logseq.txt`). Do **not** use for bulk data — the partition is only 448 KB.
 
 ### SD card  (SPI, GPIO 10–13)
 
@@ -582,7 +749,7 @@ if (sd_available()) {
 }
 ```
 
-Use for data logging and large assets. `sd_init()` prints card type and capacity to serial.
+Use for data logging and large assets. `sd_init()` calls `wlog()` with card type and capacity. `sd_total_bytes()` and `sd_used_bytes()` expose capacity for the Storage page display.
 
 ---
 
@@ -615,7 +782,7 @@ Use for data logging and large assets. `sd_init()` prints card type and capacity
 
 The RGB panel framebuffer is allocated by `esp_lcd_rgb_panel_create()` at `display->init()` — outside the Arduino heap — which is why `ESP.getPsramSize()` reports 0 while the display works normally.
 
-The `ScreenCube` sprite (300×300, 175 KB) is allocated from internal SRAM. `ScreenVehicle` and `ScreenGPS` draw directly with no sprite.
+The `ScreenCube` sprite (300×300, 175 KB) is allocated from internal SRAM. `ScreenVehicle`, `ScreenGPS`, and `ScreenStorage` draw directly with no sprite.
 
 ---
 

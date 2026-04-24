@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "../net/wifi_log.h"
 #include <LittleFS.h>
 #include <SD.h>
 #include <SPI.h>
@@ -17,7 +18,7 @@ static bool     _sdMounted = false;
 bool storage_init()
 {
     if (!LittleFS.begin(true)) {
-        Serial.println("[fs] LittleFS mount failed");
+        wlog("[fs] LittleFS mount failed");
         return false;
     }
     storage_info();
@@ -48,7 +49,7 @@ bool storage_remove(const char* path) { return LittleFS.remove(path); }
 
 void storage_info()
 {
-    Serial.printf("[fs] LittleFS  %u KB used / %u KB total\n",
+    wlog("[fs] LittleFS  %u KB used / %u KB total",
         (unsigned)(LittleFS.usedBytes()  / 1024),
         (unsigned)(LittleFS.totalBytes() / 1024));
 }
@@ -59,7 +60,7 @@ bool sd_init()
 {
     _sdSPI.begin(SD_PIN_SCK, SD_PIN_MISO, SD_PIN_MOSI, SD_PIN_CS);
     if (!SD.begin(SD_PIN_CS, _sdSPI)) {
-        Serial.println("[sd] no card or init failed");
+        wlog("[sd] no card or init failed");
         _sdMounted = false;
         return false;
     }
@@ -104,11 +105,14 @@ bool sd_remove(const char* path)
 
 void sd_info()
 {
-    if (!_sdMounted) { Serial.println("[sd] not mounted"); return; }
+    if (!_sdMounted) { wlog("[sd] not mounted"); return; }
     uint64_t total = SD.totalBytes();
     uint64_t used  = SD.usedBytes();
-    Serial.printf("[sd] %llu MB used / %llu MB total  (type: %s)\n",
+    wlog("[sd] %llu MB used / %llu MB total  (type: %s)",
         used  / (1024 * 1024),
         total / (1024 * 1024),
         SD.cardType() == CARD_SDHC ? "SDHC" : "SD");
 }
+
+uint64_t sd_total_bytes() { return _sdMounted ? SD.totalBytes() : 0; }
+uint64_t sd_used_bytes()  { return _sdMounted ? SD.usedBytes()  : 0; }

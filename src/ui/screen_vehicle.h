@@ -11,10 +11,14 @@ public:
 private:
     int  _startY = 0;
 
-    // Stored formatted strings — compared each frame to skip unchanged values
+    // Left column (engine): RPM, Throttle, MAP, Ambient
     char _fmtRpm[10]      = "";
     char _fmtThrottle[10] = "";
     char _fmtMap[10]      = "";
     char _fmtAmbient[10]  = "";
-    char _fmtFuel[10]     = "";
+
+    // Right column (fuel): flow, per-100km, used
+    char _fmtFuelFlow[10]  = "";
+    char _fmtFuel100[10]   = "";
+    char _fmtFuelUsed[10]  = "";
 };

@@ -88,14 +88,16 @@ void ScreenDash::drawStaticDial(lgfx::LovyanGFX& gfx, int cx, int cy,
 
     gfx.drawCircle(cx, cy, _R + 3, gfx.color888(0x38, 0x38, 0x38));
 
-    gfx.setTextSize(2);
+    gfx.setTextSize(1);
+    gfx.setFont(&lgfx::fonts::DejaVu18);
+    gfx.setTextColor(gfx.color888(0x88, 0x88, 0x88), TFT_BLACK);
+
     for (float v = 0; v <= maxV + 0.01f; v += majorStep) {
-        float angle = valToAngle(v, maxV);   // ptAt convention — tick labels only
+        float angle = valToAngle(v, maxV);
         char lbl[6];
         snprintf(lbl, sizeof(lbl), "%.0f", kiloLabels ? v / 1000.f : v);
         int lx, ly;
         ptAt(cx, cy, LBL_R, angle, lx, ly);
-        gfx.setTextColor(gfx.color888(0x88, 0x88, 0x88), TFT_BLACK);
         int tw = (int)gfx.textWidth(lbl);
         int th = (int)gfx.fontHeight();
         gfx.setCursor(lx - tw / 2, ly - th / 2);
@@ -103,7 +105,7 @@ void ScreenDash::drawStaticDial(lgfx::LovyanGFX& gfx, int cx, int cy,
     }
 
     if (kiloLabels) {
-        gfx.setTextSize(1);
+        gfx.setFont(&lgfx::fonts::DejaVu9);
         gfx.setTextColor(gfx.color888(0x44, 0x44, 0x44), TFT_BLACK);
         const char* hint = "x1000 rpm";
         gfx.setCursor(cx - (int)gfx.textWidth(hint) / 2, cy + 46);
@@ -185,24 +187,44 @@ void ScreenDash::drawArc(lgfx::LovyanGFX& gfx, int cx, int cy,
 }
 
 // ── Centre number (drawn when formatted string changes) ──────────────────────
+//
+// Layout is computed from actual font metrics so it adapts if the font changes.
 
 void ScreenDash::drawNumber(lgfx::LovyanGFX& gfx, int cx, int cy,
-                             float val, const char* unit) const
+                             float val, float maxVal, const char* unit) const
 {
-    gfx.fillRect(cx - 68, cy - 42, 136, 76, TFT_BLACK);
+    char buf[8], maxBuf[8];
+    snprintf(buf,    sizeof(buf),    "%.0f", val);
+    snprintf(maxBuf, sizeof(maxBuf), "%.0f", maxVal);
 
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%.0f", val);
-    gfx.setTextSize(5);
+    gfx.setTextSize(1);
+
+    gfx.setFont(&lgfx::fonts::DejaVu40);
+    int numH    = (int)gfx.fontHeight();
+    int numW    = (int)gfx.textWidth(buf);
+    int maxNumW = (int)gfx.textWidth(maxBuf);   // widest the number can ever be
+
+    gfx.setFont(&lgfx::fonts::DejaVu18);
+    int unitH = (int)gfx.fontHeight();
+    int unitW = (int)gfx.textWidth(unit);
+
+    const int GAP  = 4;
+    int totalH = numH + GAP + unitH;
+    int numY   = cy - totalH / 2;
+    int unitY  = numY + numH + GAP;
+    // Use max-number width for clearing so shorter numbers always erase the old wider ones.
+    int clearW = (maxNumW > unitW ? maxNumW : unitW) + 12;
+
+    gfx.fillRect(cx - clearW / 2, numY, clearW, totalH, TFT_BLACK);
+
+    gfx.setFont(&lgfx::fonts::DejaVu40);
     gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-    int tw = (int)gfx.textWidth(buf);
-    gfx.setCursor(cx - tw / 2, cy - 42);
+    gfx.setCursor(cx - numW / 2, numY);
     gfx.print(buf);
 
-    gfx.setTextSize(2);
+    gfx.setFont(&lgfx::fonts::DejaVu18);
     gfx.setTextColor(gfx.color888(0x68, 0x68, 0x68), TFT_BLACK);
-    int uw = (int)gfx.textWidth(unit);
-    gfx.setCursor(cx - uw / 2, cy + 14);
+    gfx.setCursor(cx - unitW / 2, unitY);
     gfx.print(unit);
 }
 
@@ -221,21 +243,29 @@ void ScreenDash::updateExtra(lgfx::LovyanGFX& gfx,
     strncpy(stored, key, storedSz - 1);
     stored[storedSz - 1] = '\0';
 
-    const int COL_W = 140;
-    gfx.fillRect(cx - COL_W / 2, y, COL_W, 36, TFT_BLACK);
-
-    // Label line (includes unit)
     gfx.setTextSize(1);
+
+    gfx.setFont(&lgfx::fonts::DejaVu12);
+    int lblH = (int)gfx.fontHeight();
+    int lw   = (int)gfx.textWidth(label);
+
+    gfx.setFont(&lgfx::fonts::DejaVu18);
+    int valH = (int)gfx.fontHeight();
+    int vw   = (int)gfx.textWidth(numVal);
+
+    const int GAP   = 2;
+    const int COL_W = 150;
+    int rowH = lblH + GAP + valH;
+    gfx.fillRect(cx - COL_W / 2, y, COL_W, rowH, TFT_BLACK);
+
+    gfx.setFont(&lgfx::fonts::DejaVu12);
     gfx.setTextColor(gfx.color888(0x55, 0x55, 0x55), TFT_BLACK);
-    int lw = (int)gfx.textWidth(label);
     gfx.setCursor(cx - lw / 2, y);
     gfx.print(label);
 
-    // Value line (number only)
-    gfx.setTextSize(2);
+    gfx.setFont(&lgfx::fonts::DejaVu18);
     gfx.setTextColor(rgb(gfx, valCol), TFT_BLACK);
-    int vw = (int)gfx.textWidth(numVal);
-    gfx.setCursor(cx - vw / 2, y + 14);
+    gfx.setCursor(cx - vw / 2, y + lblH + GAP);
     gfx.print(numVal);
 }
 
@@ -246,7 +276,8 @@ void ScreenDash::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t conten
     if (_needsRedraw) {
         gfx.fillRect(0, 0, contentW, contentH, TFT_BLACK);
 
-        gfx.setTextSize(2);
+        gfx.setTextSize(1);
+        gfx.setFont(&lgfx::fonts::DejaVu18);
         gfx.setTextColor(gfx.color888(0x50, 0x50, 0x50), TFT_BLACK);
         gfx.setCursor(_sCX - (int)gfx.textWidth("Speed") / 2, 8);
         gfx.print("Speed");
@@ -286,7 +317,7 @@ void ScreenDash::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t conten
         char buf[8];
         snprintf(buf, sizeof(buf), "%.0f", vdata.speed_kmh);
         if (strcmp(buf, _fmtSpeedNum) != 0) {
-            drawNumber(gfx, _sCX, _sCY, vdata.speed_kmh, "km/h");
+            drawNumber(gfx, _sCX, _sCY, vdata.speed_kmh, 140.f, "km/h");
             strncpy(_fmtSpeedNum, buf, sizeof(_fmtSpeedNum) - 1);
         }
     }
@@ -306,7 +337,7 @@ void ScreenDash::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t conten
         char buf[8];
         snprintf(buf, sizeof(buf), "%.0f", vdata.rpm);
         if (strcmp(buf, _fmtRpmNum) != 0) {
-            drawNumber(gfx, _rCX, _rCY, vdata.rpm, "rpm");
+            drawNumber(gfx, _rCX, _rCY, vdata.rpm, 6000.f, "rpm");
             strncpy(_fmtRpmNum, buf, sizeof(_fmtRpmNum) - 1);
         }
     }

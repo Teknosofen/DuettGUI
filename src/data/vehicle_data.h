@@ -20,6 +20,7 @@ struct VehicleData {
     double lon         = 0.0;
     float  altitude_m  = 0.0f;
     bool   gps_valid   = false;
+    char   timestamp[24] = "";  // "2024-01-15T14:32:07" or "T+1234s"
 };
 
 extern VehicleData vdata;

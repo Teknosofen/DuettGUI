@@ -18,20 +18,36 @@ static const char* compassPoint(float deg)
 
 static void fmtCoord(char* buf, size_t len, double dd, bool isLat)
 {
-    char   dir    = isLat ? (dd >= 0 ? 'N' : 'S') : (dd >= 0 ? 'E' : 'W');
-    double absDD  = fabs(dd);
-    int    deg    = (int)absDD;
-    double min    = (absDD - deg) * 60.0;
+    char   dir   = isLat ? (dd >= 0 ? 'N' : 'S') : (dd >= 0 ? 'E' : 'W');
+    double absDD = fabs(dd);
+    int    deg   = (int)absDD;
+    double min   = (absDD - deg) * 60.0;
     snprintf(buf, len, "%d\xB0 %08.4f' %c", deg, min, dir);
 }
 
-// Erase a rectangle then draw text at (x, y) in the given size and colour.
+// Map the old integer textSize to the closest DejaVu font.
+static void setDejaVu(lgfx::LovyanGFX& gfx, int textSize)
+{
+    switch (textSize) {
+        case 7:  gfx.setFont(&lgfx::fonts::DejaVu56); break;
+        case 5:  gfx.setFont(&lgfx::fonts::DejaVu40); break;
+        case 4:  gfx.setFont(&lgfx::fonts::DejaVu40); break;
+        case 3:  gfx.setFont(&lgfx::fonts::DejaVu24); break;
+        case 2:  gfx.setFont(&lgfx::fonts::DejaVu18); break;
+        default: gfx.setFont(&lgfx::fonts::DejaVu9);  break;
+    }
+    gfx.setTextSize(1);
+}
+
+// Erase a rectangle then draw text at (x, y).
+// eraseH is a minimum; actual font height is used if larger.
 static void redrawText(lgfx::LovyanGFX& gfx,
                        int x, int y, int eraseW, int eraseH,
                        const char* text, int textSize, uint32_t col)
 {
-    gfx.fillRect(x, y, eraseW, eraseH, TFT_BLACK);
-    gfx.setTextSize(textSize);
+    setDejaVu(gfx, textSize);
+    int fh = (int)gfx.fontHeight();
+    gfx.fillRect(x, y, eraseW, fh > eraseH ? fh : eraseH, TFT_BLACK);
     gfx.setTextColor(
         gfx.color888((col >> 16) & 0xFF, (col >> 8) & 0xFF, col & 0xFF),
         TFT_BLACK);
@@ -45,8 +61,9 @@ static void redrawTextRight(lgfx::LovyanGFX& gfx,
                              const char* text, int textSize, uint32_t col,
                              int alignRight)
 {
-    gfx.fillRect(eraseX, y, eraseW, eraseH, TFT_BLACK);
-    gfx.setTextSize(textSize);
+    setDejaVu(gfx, textSize);
+    int fh = (int)gfx.fontHeight();
+    gfx.fillRect(eraseX, y, eraseW, fh > eraseH ? fh : eraseH, TFT_BLACK);
     gfx.setTextColor(
         gfx.color888((col >> 16) & 0xFF, (col >> 8) & 0xFF, col & 0xFF),
         TFT_BLACK);
@@ -56,7 +73,6 @@ static void redrawTextRight(lgfx::LovyanGFX& gfx,
 }
 
 // Update a stored string; call redraw only when the value changes.
-// Returns true if redrawn.
 static bool updateField(lgfx::LovyanGFX& gfx,
                         char* stored, size_t storedSz, const char* newVal,
                         int x, int y, int eraseW, int eraseH,
@@ -91,18 +107,20 @@ void ScreenGPS::init(uint16_t contentW, uint16_t contentH)
 void ScreenGPS::drawStatic(lgfx::LovyanGFX& gfx, uint16_t w, uint16_t h)
 {
     // Section labels
-    Widget::sectionLabel(gfx, 30,      18,  "Speed");
-    Widget::sectionLabel(gfx, 450,     18,  "Heading");
-    Widget::sectionLabel(gfx, 30,      222, "Position");
+    Widget::sectionLabel(gfx, 30,  18,  "Speed");
+    Widget::sectionLabel(gfx, 450, 18,  "Heading");
+    Widget::sectionLabel(gfx, 30,  222, "Position");
 
     // Units that never change
-    gfx.setTextSize(3);
+    gfx.setFont(&lgfx::fonts::DejaVu24);
+    gfx.setTextSize(1);
     gfx.setTextColor(gfx.color888(0x50, 0x50, 0x50), TFT_BLACK);
     gfx.setCursor(30,  170); gfx.print("km/h");
     gfx.setCursor(450, 145); gfx.print("deg");
 
-    // Static "Altitude " prefix on the altitude line
-    gfx.setTextSize(2);
+    // "Altitude" static label
+    gfx.setFont(&lgfx::fonts::DejaVu18);
+    gfx.setTextSize(1);
     gfx.setTextColor(gfx.color888(0x70, 0x70, 0x70), TFT_BLACK);
     gfx.setCursor(30, 350); gfx.print("Altitude");
 
@@ -129,19 +147,19 @@ void ScreenGPS::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t content
         _needsRedraw = false;
     }
 
-    // ── Speed (size 7, green) ─────────────────────────────────────────────
+    // ── Speed (DejaVu56, green) ───────────────────────────────────────────
     snprintf(buf, sizeof(buf), "%.1f", vdata.speed_kmh);
     updateField(gfx, _fmtSpeed, sizeof(_fmtSpeed), buf,
                 30, 50, 216, 60,
                 7, 0x00FF88);
 
-    // ── Heading (size 5, cyan) ────────────────────────────────────────────
+    // ── Heading (DejaVu40, cyan) ──────────────────────────────────────────
     snprintf(buf, sizeof(buf), "%.1f", vdata.heading_deg);
     updateField(gfx, _fmtHeading, sizeof(_fmtHeading), buf,
                 450, 52, 156, 44,
                 5, 0x00BFFF);
 
-    // ── Compass point (size 5, amber, right-aligned) ──────────────────────
+    // ── Compass point (DejaVu40, amber, right-aligned) ────────────────────
     updateFieldRight(gfx, _fmtCompass, sizeof(_fmtCompass),
                      compassPoint(vdata.heading_deg),
                      contentW - 116, 82, 112, 44,
@@ -159,10 +177,10 @@ void ScreenGPS::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t content
                 30, 298, 276, 28,
                 3, 0xE0E0E0);
 
-    // ── Altitude value (after the static "Altitude" label) ───────────────
-    snprintf(buf, sizeof(buf), "  %.0f m", vdata.altitude_m);
+    // ── Altitude value (to the right of the static "Altitude" label) ─────
+    snprintf(buf, sizeof(buf), "%.0f m", vdata.altitude_m);
     updateField(gfx, _fmtAlt, sizeof(_fmtAlt), buf,
-                30 + 8 * 12, 350, 110, 18,   // "Altitude" = 8 chars × 12px
+                120, 350, 110, 24,
                 2, 0x90D0FF);
 
     // ── Fuel economy / flow ───────────────────────────────────────────────
@@ -172,25 +190,26 @@ void ScreenGPS::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t content
         snprintf(buf, sizeof(buf), "%.1f L/h", vdata.fuel_flow_lph);
 
     updateField(gfx, _fmtFuel, sizeof(_fmtFuel), buf,
-                30, 397, 200, 18,
+                30, 397, 200, 24,
                 2, 0xFF8000);
 
     // ── GPS status dot + label ────────────────────────────────────────────
     if (!_gpsStatusDrawn || vdata.gps_valid != _prevGpsValid) {
-        bool ok     = vdata.gps_valid;
-        int  dotX   = (int)contentW - 28;
-        int  dotY   = 404;
+        bool ok   = vdata.gps_valid;
+        int  dotX = (int)contentW - 28;
+        int  dotY = 404;
 
         gfx.fillCircle(dotX, dotY, 10,
             ok ? gfx.color888(0x00, 0xE0, 0x00)
                : gfx.color888(0xE0, 0x00, 0x00));
 
         const char* statusTxt = ok ? "GPS fix" : "No fix";
-        gfx.setTextSize(2);
+        gfx.setFont(&lgfx::fonts::DejaVu18);
+        gfx.setTextSize(1);
         gfx.setTextColor(gfx.color888(0x80, 0x80, 0x80), TFT_BLACK);
+        int fh  = (int)gfx.fontHeight();
         int stw = (int)gfx.textWidth(statusTxt);
-        // Erase text area then redraw
-        gfx.fillRect(dotX - 20 - stw, 397, stw + 4, 18, TFT_BLACK);
+        gfx.fillRect(dotX - 20 - stw, 397, stw + 4, fh, TFT_BLACK);
         gfx.setCursor(dotX - 18 - stw, 397);
         gfx.print(statusTxt);
 

@@ -94,8 +94,9 @@ void ScreenCube::update(lgfx::LovyanGFX& gfx, uint16_t contentW, uint16_t conten
                          target->color888(br, br, br));
     }
 
-    target->setTextColor(target->color888(80, 80, 80), TFT_BLACK);
+    target->setFont(&lgfx::fonts::DejaVu9);
     target->setTextSize(1);
+    target->setTextColor(target->color888(80, 80, 80), TFT_BLACK);
     target->setCursor(5, 5);
     target->print("Touch: move cube");
 

@@ -3,12 +3,14 @@
 #include "fs/storage.h"
 #include "sensors/gps_reader.h"
 #include "data/sim.h"
+#include "data/logger.h"
 #include "net/wifi_log.h"
 #include "net/ota.h"
 #include "ui/screen_manager.h"
 #include "ui/screen_dash.h"
 #include "ui/screen_vehicle.h"
 #include "ui/screen_gps.h"
+#include "ui/screen_storage.h"
 #include "ui/screen_cube.h"
 
 static ScreenManager mgr;
@@ -16,6 +18,7 @@ static ScreenManager mgr;
 static ScreenDash    screenDash;
 static ScreenVehicle screenVehicle;
 static ScreenGPS     screenGPS;
+static ScreenStorage screenStorage;
 static ScreenCube    screenCube;
 
 void setup()
@@ -36,6 +39,7 @@ void setup()
     wlog("[2/4] storage_init");
     storage_init();
     sd_init();
+    logger_init();
     wlog("[2/4] storage OK");
 
     wlog("[3/4] gps_init");
@@ -46,7 +50,8 @@ void setup()
     mgr.addPage(&screenDash);     // 1 — Dashboard (dials)
     mgr.addPage(&screenVehicle);  // 2 — Engine / fuel table
     mgr.addPage(&screenGPS);      // 3 — GPS
-    mgr.addPage(&screenCube);     // 4 — Rotating cube demo
+    mgr.addPage(&screenStorage);  // 4 — Storage / logging
+    mgr.addPage(&screenCube);     // 5 — Rotating cube demo
     mgr.begin();
     wlog("[4/4] ScreenManager OK");
 
@@ -62,6 +67,7 @@ void loop()
     ota_update();
     gps_update();
     sim_update();     // overrides vdata when SIM_ENABLE 1; compiles away when 0
+    logger_update();
     mgr.update();
 
     if (millis() - _lastHeartbeat > 30000) {

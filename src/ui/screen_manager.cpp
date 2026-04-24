@@ -167,7 +167,8 @@ void ScreenManager::drawNavBar()
     snprintf(label, sizeof(label), "%s   %d / %d",
              _pages[_current]->name(), _current + 1, _count);
 
-    display->setTextSize(2);
+    display->setFont(&lgfx::fonts::DejaVu18);
+    display->setTextSize(1);
     display->setTextColor(
         display->color888(0xE0, 0xE0, 0xE0),
         display->color888(NAV_BG_R, NAV_BG_G, NAV_BG_B));

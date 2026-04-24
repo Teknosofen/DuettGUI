@@ -53,7 +53,7 @@ private:
                           float majorStep, float minorStep) const;
 
     void drawNumber(lgfx::LovyanGFX& gfx, int cx, int cy,
-                    float val, const char* unit) const;
+                    float val, float maxVal, const char* unit) const;
 
     // label should include the unit, e.g. "Throttle [%]".
     // stored holds "label|value" — redraws when either label or value changes.

@@ -2,30 +2,22 @@
 #include <LovyanGFX.hpp>
 #include <string.h>
 
-// Stateless drawing helpers — every function receives the render target
-// so they work identically on a sprite or directly on the display.
 namespace Widget {
 
     static constexpr int ROW_H = 80;   // standard data-row height (px)
+    static constexpr int COL_W = 400;  // each column is half the 800px content width
 
-    // Full data row (label + value + unit). Use for the initial render.
-    //   col 30    label   (size 2, gray)
-    //   col ~580  value   (size 4, valueColor, right-aligned)
-    //   col 592   unit    (size 2, dim gray)
+    // Full data row. col=0: left half (x 0–399), col=1: right half (x 400–799).
     void dataRow(lgfx::LovyanGFX& gfx, int y,
                  const char* label, const char* value, const char* unit,
-                 uint32_t valueColor = 0xE0E0E0);
+                 uint32_t valueColor = 0xE0E0E0, int col = 0);
 
-    // Partial update: erases only the value column and redraws it.
-    // Compares newVal against stored[]; skips if unchanged.
-    // stored[] is updated on change. Returns true if a redraw occurred.
+    // Partial update: erases only the value area and redraws it when newVal changes.
     bool updateRowValue(lgfx::LovyanGFX& gfx, int rowY,
                         char* stored, size_t storedSize,
-                        const char* newVal, uint32_t color);
+                        const char* newVal, uint32_t color, int col = 0);
 
-    // Thin horizontal rule across the content width
     void hRule(lgfx::LovyanGFX& gfx, int y, int w);
-
-    // Small section heading (size 2, dim gray)
+    void vRule(lgfx::LovyanGFX& gfx, int x, int h);
     void sectionLabel(lgfx::LovyanGFX& gfx, int x, int y, const char* text);
 }

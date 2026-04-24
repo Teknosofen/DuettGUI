@@ -59,6 +59,9 @@ void sim_update()
     vdata.lon         =  18.0686;
     vdata.altitude_m  =  28.f;
     vdata.heading_deg =  45.f;
+
+    uint32_t secs = millis() / 1000;
+    snprintf(vdata.timestamp, sizeof(vdata.timestamp), "T+%lus", (unsigned long)secs);
 }
 
 #endif // SIM_ENABLE

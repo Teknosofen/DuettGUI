@@ -36,11 +36,25 @@ void gps_update()
     if (!GPS.parse(GPS.lastNMEA())) return;
 
     vdata.gps_valid = GPS.fix;
-    if (!GPS.fix) return;
+    if (!GPS.fix) {
+        snprintf(vdata.timestamp, sizeof(vdata.timestamp),
+                 "T+%lus", (unsigned long)(millis() / 1000));
+        return;
+    }
 
     vdata.lat         = toDecDeg(GPS.latitude,  GPS.lat);
     vdata.lon         = toDecDeg(GPS.longitude, GPS.lon);
     vdata.speed_kmh   = GPS.speed * 1.852f;   // knots → km/h
     vdata.heading_deg = GPS.angle;
     vdata.altitude_m  = GPS.altitude;
+
+    if (GPS.year > 0) {
+        snprintf(vdata.timestamp, sizeof(vdata.timestamp),
+                 "20%02u-%02u-%02uT%02u:%02u:%02u",
+                 GPS.year, GPS.month, GPS.day,
+                 GPS.hour, GPS.minute, GPS.seconds);
+    } else {
+        snprintf(vdata.timestamp, sizeof(vdata.timestamp),
+                 "T+%lus", (unsigned long)(millis() / 1000));
+    }
 }

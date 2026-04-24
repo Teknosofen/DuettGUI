@@ -15,5 +15,7 @@ bool   sd_available();          // true if card mounted and readable
 bool   sd_exists(const char* path);
 String sd_read(const char* path);
 bool   sd_write(const char* path, const String& data);
-bool   sd_remove(const char* path);
-void   sd_info();
+bool     sd_remove(const char* path);
+void     sd_info();
+uint64_t sd_total_bytes();
+uint64_t sd_used_bytes();
