@@ -66,6 +66,7 @@ board_build.filesystem          = littlefs
 lib_deps =
     lovyan03/LovyanGFX @ ^1.1.16
     adafruit/Adafruit GPS Library @ ^1.5.4
+    h2zero/NimBLE-Arduino @ ^1.4.3
 
 [env:usb]
 extends      = base
@@ -79,6 +80,8 @@ upload_flags    = --auth=duett1964
 ```
 
 > **Why pioarduino?** The standard `espressif32` platform uses IDF 4.4 which hangs during OPI PSRAM init. pioarduino 51.03.07 uses IDF 5.x which initialises PSRAM correctly.
+
+> **NimBLE-Arduino version:** `h2zero/NimBLE-Arduino @ ^1.4.3` targets IDF 4.x. If the build fails with API errors on this IDF 5.x platform, change the version to `^2.0.0` — the public API is identical.
 
 ### PlatformIO Commands
 
@@ -104,22 +107,22 @@ upload_flags    = --auth=duett1964
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                          ScreenManager                               │
-│       touch polling · page switching · nav bar                       │
-├──────────┬───────────┬───────────┬───────────┬──────────────────────┤
-│ Screen   │ Screen    │ Screen    │ Screen    │ Screen               │
-│ Dash     │ Vehicle   │ GPS       │ Storage   │ Cube                 │
-├──────────┴───────────┴───────────┴───────────┴──────────────────────┤
-│         Widget  (dataRow · hRule · vRule · sectionLabel)             │
-├──────────────────────────────────────────────────────────────────────┤
-│                           VehicleData                                │
-│     shared struct — updated by GPS reader and/or sim_update()        │
-├──────────────────────────────────────────────────────────────────────┤
-│       Logger  (CSV on SD · sequence counter on LittleFS)             │
-├──────────────────────────────────────────────────────────────────────┤
-│               display.h / LovyanGFX / RGB LCD panel                  │
-└──────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                             ScreenManager                                    │
+│          touch polling · page switching · nav bar                            │
+├────────┬──────────┬─────────┬─────────┬─────────┬──────────┬───────────────┤
+│ Screen │ Screen   │ Screen  │ Screen  │ Screen  │ Screen   │ Screen        │
+│ Dash   │ Ignition │ Vehicle │ GPS     │ Storage │ Settings │ Cube          │
+├────────┴──────────┴─────────┴─────────┴─────────┴──────────┴───────────────┤
+│              Widget  (dataRow · hRule · vRule · sectionLabel)                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                              VehicleData                                     │
+│    updated by: IgnitionBT (RPM/advance/temp/volt) · GPS reader · sim        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│     IgnitionBT (NimBLE central)        Logger (CSV/SD · seq/LittleFS)        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                    display.h / LovyanGFX / RGB LCD panel                     │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Screen layout
@@ -147,10 +150,10 @@ src/
 ├── main.cpp                    — setup() · loop() · page registration
 │
 ├── data/
-│   ├── vehicle_data.h          — VehicleData struct (all sensor values + timestamp)
+│   ├── vehicle_data.h          — VehicleData struct (engine · GPS · ignition fields)
 │   ├── vehicle_data.cpp        — global vdata instance
-│   ├── sim.h                   — SIM_ENABLE #define toggle
-│   ├── sim.cpp                 — synthetic drive-cycle (compiles away when SIM_ENABLE 0)
+│   ├── sim.h                   — SIM_ENABLE compile flag + sim_set()/sim_running() API
+│   ├── sim.cpp                 — synthetic drive-cycle; runtime-togglable via sim_set()
 │   ├── logger.h                — logger_init/update/enable/query API
 │   └── logger.cpp              — CSV logger: LittleFS sequence counter + SD file I/O
 │
@@ -160,7 +163,9 @@ src/
 │
 ├── sensors/
 │   ├── gps_reader.h            — gps_init() · gps_update()
-│   └── gps_reader.cpp          — Adafruit_GPS on UART0, populates vdata + timestamp
+│   ├── gps_reader.cpp          — Adafruit_GPS on UART0, populates vdata + timestamp
+│   ├── ignition_bt.h           — ignition_bt_init/update/state/send_* API
+│   └── ignition_bt.cpp         — NimBLE central client for 123-ignition TUNE+
 │
 ├── net/
 │   ├── wifi_log.h              — wlog() declaration + WIFI_LOG_SSID / PASS
@@ -172,9 +177,11 @@ src/
 │   ├── screen.h                — abstract Screen base class
 │   ├── screen_manager.h/.cpp   — page registry · touch routing · nav bar
 │   ├── screen_dash.h/.cpp      — Dashboard: speed + RPM dials with extras
+│   ├── screen_ignition.h/.cpp  — 123-ignition data display + advance/tune controls
 │   ├── screen_vehicle.h/.cpp   — two-column engine / fuel readout
 │   ├── screen_gps.h/.cpp       — GPS speed · heading · position
 │   ├── screen_storage.h/.cpp   — SD status · logging toggle · file info
+│   ├── screen_settings.h/.cpp  — runtime settings (simulation toggle)
 │   ├── screen_cube.h/.cpp      — rotating wireframe cube demo
 │   └── widgets.h/.cpp          — shared stateless drawing helpers
 │
@@ -212,6 +219,13 @@ Single global struct `vdata` shared by all pages. Sensor reader classes update i
 | `altitude_m` | `float` | GPS altitude |
 | `gps_valid` | `bool` | GPS fix acquired |
 | `timestamp[24]` | `char[]` | ISO-8601 string when GPS fix valid (`"2025-06-01T12:34:56"`); `"T+Xs"` from `millis()/1000` otherwise |
+| `ign_advance_deg` | `float` | Ignition advance (° BTDC) from 123-ignition BLE |
+| `ign_temp_c` | `float` | Ignition module temperature (°C) |
+| `ign_voltage_v` | `float` | Supply voltage seen by ignition module (V) |
+| `ign_pressure_kpa` | `float` | MAP/vacuum from ignition sensor (kPa absolute) |
+| `ign_ampere` | `float` | Coil current (A) |
+| `ign_connected` | `bool` | BLE link to ignition module is active |
+| `ign_tune_mode` | `bool` | Tuning mode active on the ignition module |
 
 ---
 
@@ -347,10 +361,12 @@ The two-column layout is supported via the `col` parameter (`0` = left, `1` = ri
 | # | Screen | Name |
 |---|---|---|
 | 1 | `ScreenDash` | Dashboard |
-| 2 | `ScreenVehicle` | Vehicle |
-| 3 | `ScreenGPS` | GPS |
-| 4 | `ScreenStorage` | Storage |
-| 5 | `ScreenCube` | Cube Demo |
+| 2 | `ScreenIgnition` | Ignition |
+| 3 | `ScreenVehicle` | Vehicle |
+| 4 | `ScreenGPS` | GPS |
+| 5 | `ScreenStorage` | Storage |
+| 6 | `ScreenSettings` | Settings |
+| 7 | `ScreenCube` | Cube Demo |
 
 ---
 
@@ -459,7 +475,7 @@ The centre number (`drawNumber`) uses **DejaVu40** for the value and **DejaVu18*
 
 ---
 
-### ScreenStorage  —  `"Storage"` (page 4)
+### ScreenStorage  —  `"Storage"` (page 5)
 
 Shows SD card health, storage capacity, and logging controls on a single screen.
 
@@ -497,7 +513,41 @@ No sprite — draws directly on `gfx`.
 
 ---
 
-### ScreenCube  —  `"Cube Demo"` (page 5)
+### ScreenSettings  —  `"Settings"` (page 6)
+
+Runtime configuration. Currently contains one setting: the simulation toggle.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Settings                                               │
+├─────────────────────────────────────────────────────────┤
+│  Sensor Simulation                                      │
+│         ┌──────────────────────────────┐               │
+│         │  · SIM ON  (or  · SIM OFF)  │  toggle button │
+│         └──────────────────────────────┘               │
+│  [description of active/inactive behaviour]             │
+├─────────────────────────────────────────────────────────┤
+│  RPM source                                             │
+│  Sim ON  » synthetic drive cycle                        │
+│  Sim OFF + BLE connected  » RPM from 123-ignition       │
+│  Sim OFF + no BLE  » RPM = 0                            │
+└─────────────────────────────────────────────────────────┘
+```
+
+| Element | Detail |
+|---|---|
+| Toggle button | `BTN_X=260, BTN_Y=115, BTN_W=280, BTN_H=60` — green (SIM ON) or gray (SIM OFF) |
+| Description | Explains effect of current state; updates on toggle |
+| RPM source table | Static text showing all three RPM source scenarios |
+| Debounce | 400 ms |
+
+**Touch:** `onTouch()` calls `sim_set(!sim_running())` when tap lands inside the button rectangle.
+
+No sprite — draws directly on `gfx`.
+
+---
+
+### ScreenCube  —  `"Cube Demo"` (page 7)
 
 Rotating wireframe 3D cube, touch to move. Uses a 300×300 sprite (~175 KB internal heap) centred in the content area. Falls back to direct draw if allocation fails.
 
@@ -505,7 +555,47 @@ Projection: `scale = 180 / (z + 5)` → vertices project ≈ ±95 px from centre
 
 **Render strategy:** redraws everything every frame (clear → draw edges → push sprite). Sets `_needsRedraw = false` at the very start of `update()` so `ScreenManager` never sees a persistent "full redraw" signal and does not redraw the nav bar every frame.
 
-### ScreenVehicle  —  `"Vehicle"` (page 2)
+### ScreenIgnition  —  `"Ignition"` (page 2)
+
+Dedicated page for the 123-ignition TUNE+ module: live data display and in-car tuning controls.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ● Connected          (or ○ Scanning... / Connecting...)  123-ignition  │  y=0–40
+├─────────────────────────────────────────────────────────────────────────┤  y=40
+│  RPM                            │  Advance                              │
+│  [DejaVu56, green]              │  [DejaVu40, cyan]                     │  y=68
+│  rpm                            │  ° BTDC                               │
+├─────────────────────────────────┼───────────────────────────────────────┤  y=165
+│  Temperature                    │  Voltage                              │
+│  [DejaVu40, orange]             │  [DejaVu40, yellow]                   │  y=194
+│  °C                             │  V                                    │
+├─────────────────────────────────┴───────────────────────────────────────┤  y=278
+│  MAP  [DejaVu24, white]  kPa                                            │
+├─────────────────────────────────────────────────────────────────────────┤  y=316
+│  [− ADV]         [TUNE MODE]            [ADV +]                         │  y=316–432
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+| Element | Detail |
+|---|---|
+| Status dot | Green = connected; amber = scanning/connecting/handshaking; gray = idle |
+| RPM | `vdata.rpm` — written by ignition BLE when sim is off |
+| Advance | `vdata.ign_advance_deg` (° BTDC) |
+| Temperature | `vdata.ign_temp_c` (°C) |
+| Voltage | `vdata.ign_voltage_v` (V) |
+| MAP | `vdata.ign_pressure_kpa` (kPa) |
+| `− ADV` button | Sends advance − command; repeats at 350 ms while held |
+| `TUNE MODE` button | Toggles tune mode on/off; 600 ms debounce; turns amber when active |
+| `ADV +` button | Sends advance + command; repeats at 350 ms while held |
+
+No sprite — draws directly on `gfx`.
+
+**Render strategy:** full render on `_needsRedraw`; partial update per value field (each erased and redrawn only when its formatted string changes); status dot and text redrawn only when connection state changes; TUNE MODE button redrawn only when `vdata.ign_tune_mode` changes.
+
+---
+
+### ScreenVehicle  —  `"Vehicle"` (page 3)
 
 Seven `Widget::dataRow` rows split across two columns, centred vertically in the 432 px content area.
 
@@ -533,7 +623,7 @@ No sprite — draws directly on `gfx`.
 
 **Render strategy:** on `_needsRedraw` performs a full render (background + vRule divider + all labels, units, values); on subsequent frames calls `Widget::updateRowValue()` for each row, which erases and redraws the value cell only when the formatted string changes.
 
-### ScreenGPS  —  `"GPS"` (page 3)
+### ScreenGPS  —  `"GPS"` (page 4)
 
 ```
 ┌──────────────────────┬──────────────────────────┐
@@ -561,14 +651,35 @@ A synthetic drive cycle animates `vdata` so the dashboard can be tested without 
 
 ### Enabling / disabling
 
+Two independent controls:
+
+**Compile-time flag** (`src/data/sim.h`):
+
 ```c
-// src/data/sim.h
-#define SIM_ENABLE 1   // 1 = simulate,  0 = real sensors
+#define SIM_ENABLE 1   // 1 = compile sim code,  0 = compile away entirely
 ```
 
-When `SIM_ENABLE` is 0 the entire `sim.cpp` translation unit is skipped and `sim_update()` is an empty `inline` — zero code size, zero runtime cost.
+When `SIM_ENABLE` is 0 the entire `sim.cpp` translation unit is skipped and all sim functions become empty inlines — zero code size, zero runtime cost.
 
-`sim_update()` is called in `loop()` **after** `gps_update()`, so it overwrites any real sensor data when enabled.
+**Runtime toggle** (Settings page or programmatic):
+
+```cpp
+sim_set(false);   // pause simulation; real/BLE data takes effect immediately
+sim_set(true);    // resume simulation
+bool active = sim_running();
+```
+
+The Settings page (page 6) exposes this toggle as a touch button. The default runtime state is `true` (simulation runs on boot when `SIM_ENABLE 1`).
+
+`sim_update()` is called in `loop()` **after** `ignition_bt_update()`. When `sim_running()` is true it overwrites all `vdata` fields (including `rpm`). When false it returns immediately, leaving sensor and BLE data untouched.
+
+**RPM source priority:**
+
+| Condition | `vdata.rpm` source |
+|---|---|
+| `sim_running() == true` | Synthetic drive cycle (overwrites everything) |
+| `sim_running() == false` AND `ign_connected == true` | 123-ignition BLE (written in notify callback) |
+| `sim_running() == false` AND no BLE | Remains at last BLE value or 0 |
 
 ### Drive cycle
 
@@ -604,6 +715,101 @@ Easing uses **smoothstep** (`t² × (3 − 2t)`) so the dials ease in and out ra
 | `altitude_m` | 28 m |
 | `heading_deg` | 45° |
 | `timestamp` | `"T+Xs"` from `millis()/1000` (no GPS hardware in sim) |
+
+---
+
+## 123-ignition BLE  (`src/sensors/ignition_bt.h/.cpp`)
+
+Integrates the **123ignition TUNE+** electronic ignition module directly into the dashboard via BLE. The module streams RPM, ignition advance, temperature, voltage, MAP pressure, and coil current as continuous BLE notifications. The ESP32-S3 acts as the BLE **central** (client); the ignition module is the peripheral. BLE and the WiFi AP coexist using the ESP32's built-in radio coexistence mode.
+
+### BLE identifiers
+
+| Item | UUID |
+|---|---|
+| Service | `da2b84f1-6279-48de-bdc0-afbea0226079` |
+| RX characteristic (write commands to module) | `BF03260C-7205-4C25-AF43-93B1C299D159` |
+| TX characteristic (notifications from module) | `18CDA784-4BD3-4370-85BB-BFED91EC86AF` |
+
+The scan matches by service UUID first; also accepts any advertising device whose name contains `"123"` as a fallback.
+
+### Connection state machine
+
+```
+IDLE ──scan start──▶ SCANNING ──device found──▶ CONNECTING
+                                                      │ (FreeRTOS task, non-blocking)
+                                                      ▼
+                                               HANDSHAKING ──3 commands──▶ ACTIVE
+                                                      │                        │
+                                               disconnect/fail          disconnect
+                                                      │                        │
+                                                      └──────── IDLE ◀─────────┘
+                                                           (retry after 8 s)
+```
+
+The connect attempt runs in a short-lived FreeRTOS task so `loop()` stays responsive during the ~1–3 s BLE connection window.
+
+### Handshake sequence
+
+Three commands are written to the RX characteristic (300 ms apart) before notifications start:
+
+| Step | Bytes | Meaning |
+|---|---|---|
+| 1 | `0x0D` | Keepalive |
+| 2 | `0x31 0x30 0x40 0x0D` — `"10@\r"` | Request advance curve |
+| 3 | `0x31 0x31 0x40 0x0D` — `"11@\r"` | Request config + PIN |
+
+After step 3, the TX characteristic CCCD is written to enable notifications. `vdata.ign_connected` is set `true` and data flows.
+
+### Packet format
+
+Every notification is a stream of 5-byte value packets, fragmented into 20-byte MTU chunks:
+
+```
+[0]  cmd     — identifies the value type
+[1]  MSB     — single ASCII hex character ('0'–'F')
+[2]  LSB     — single ASCII hex character ('0'–'F')
+[3]  csum    — cmd + 0x10 + (MSB−'0') + (LSB−'0')
+[4]  0x20 or 0x0D  — packet terminator
+```
+
+`0x24` padding bytes (keepalive filler) are silently discarded before parsing.
+
+### Value decoding
+
+| `cmd` | Value | Decode formula |
+|---|---|---|
+| `0x30` | RPM | `nibble(MSB) × 800 + nibble(LSB) × 50` |
+| `0x31` | Advance (° BTDC) | `nibble(MSB) × 3.2 + nibble(LSB) × 0.2` |
+| `0x32` | MAP/vacuum (kPa) | `hexByte(MSB, LSB)` |
+| `0x33` | Temperature (°C) | `hexByte(MSB, LSB) − 30` |
+| `0x34` | Tune mode flag | `LSB == '1'` |
+| `0x35` | Current (A) | `hexByte(MSB, LSB) / (16 / 1.85)` |
+| `0x41` | Voltage (V) | `hexByte(MSB, LSB) / (0x40 / 14.1)` |
+
+`nibble(c)` converts a single ASCII hex char to 0–15. `hexByte(hi, lo)` combines two ASCII hex chars into a 0–255 byte value.
+
+### Tune controls
+
+Three commands can be written to the RX characteristic at any time during ACTIVE state:
+
+| Function | Byte | Effect |
+|---|---|---|
+| `ignition_send_advance_plus()` | `0x61` (`'a'`) | +0.2° advance in tune mode |
+| `ignition_send_advance_minus()` | `0x72` (`'r'`) | −0.2° advance in tune mode |
+| `ignition_send_tune_toggle()` | `0x74` (`'t'`) | Enter / exit tune mode |
+
+The ScreenIgnition touch buttons call these functions with debounce (350 ms repeat for ± advance, 600 ms one-shot for tune toggle).
+
+### API
+
+| Function | Description |
+|---|---|
+| `ignition_bt_init()` | Initialise NimBLE stack; call in `setup()` after `wifi_log_init()` |
+| `ignition_bt_update()` | Drive state machine; call every `loop()` |
+| `ignition_bt_state()` | Returns `IgnBtState` enum |
+| `ignition_bt_state_str()` | Returns human-readable string (e.g. `"Connected"`, `"Scanning..."`) |
+| `ignition_send_advance_plus/minus()` | Write advance control command |
+| `ignition_send_tune_toggle()` | Write tune mode toggle command |
 
 ---
 
@@ -782,7 +988,9 @@ Use for data logging and large assets. `sd_init()` calls `wlog()` with card type
 
 The RGB panel framebuffer is allocated by `esp_lcd_rgb_panel_create()` at `display->init()` — outside the Arduino heap — which is why `ESP.getPsramSize()` reports 0 while the display works normally.
 
-The `ScreenCube` sprite (300×300, 175 KB) is allocated from internal SRAM. `ScreenVehicle`, `ScreenGPS`, and `ScreenStorage` draw directly with no sprite.
+The `ScreenCube` sprite (300×300, 175 KB) is allocated from internal SRAM. `ScreenVehicle`, `ScreenGPS`, `ScreenStorage`, `ScreenIgnition`, and `ScreenSettings` draw directly with no sprite.
+
+The NimBLE stack is initialised by `ignition_bt_init()` and shares the same 2.4 GHz radio as WiFi via the ESP32 coexistence mode. No additional RAM allocation is required beyond the NimBLE stack itself (~30 KB).
 
 ---
 
