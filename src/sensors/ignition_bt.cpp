@@ -139,8 +139,8 @@ class ClientCB : public NimBLEClientCallbacks {
 };
 static ClientCB _clientCB;
 
-class ScanCB : public NimBLEAdvertisedDeviceCallbacks {
-    void onResult(NimBLEAdvertisedDevice* dev) override {
+class ScanCB : public NimBLEScanCallbacks {
+    void onDiscovered(const NimBLEAdvertisedDevice* dev) override {
         bool matchSvc  = dev->haveServiceUUID() &&
                          dev->isAdvertisingService(NimBLEUUID(SVC_UUID));
         bool matchName = dev->haveName() &&
@@ -162,7 +162,7 @@ static ScanCB _scanCB;
 static void startScan() {
     wlog("[ign] BLE scan started");
     NimBLEScan* scan = NimBLEDevice::getScan();
-    scan->setAdvertisedDeviceCallbacks(&_scanCB, false);
+    scan->setScanCallbacks(&_scanCB, false);
     scan->setInterval(100);
     scan->setWindow(50);
     scan->setActiveScan(true);
