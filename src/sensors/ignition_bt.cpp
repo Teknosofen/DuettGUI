@@ -126,9 +126,9 @@ class ClientCB : public NimBLEClientCallbacks {
         _hsStep = 0;
         _hsMs   = 0;
     }
-    void onDisconnect(NimBLEClient*, int reason) override {
-        wlog("[ign] BLE disconnected (reason %d) — will retry in %u s",
-             reason, (unsigned)(RETRY_MS / 1000));
+    void onDisconnect(NimBLEClient*) override {
+        wlog("[ign] BLE disconnected — will retry in %u s",
+             (unsigned)(RETRY_MS / 1000));
         vdata.ign_connected = false;
         _rxChar  = nullptr;
         _txChar  = nullptr;
