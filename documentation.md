@@ -81,7 +81,7 @@ upload_flags    = --auth=duett1964
 
 > **Why pioarduino?** The standard `espressif32` platform uses IDF 4.4 which hangs during OPI PSRAM init. pioarduino 51.03.07 uses IDF 5.x which initialises PSRAM correctly.
 
-> **NimBLE-Arduino version:** `h2zero/NimBLE-Arduino @ ^1.4.3` targets IDF 4.x. If the build fails with API errors on this IDF 5.x platform, change the version to `^2.0.0` — the public API is identical.
+> **NimBLE-Arduino version:** `h2zero/NimBLE-Arduino @ ^2.0.0` is required for IDF 5.x. Version 1.4.x compiles but crashes at runtime on this platform.
 
 ### PlatformIO Commands
 
