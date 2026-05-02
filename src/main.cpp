@@ -2,24 +2,29 @@
 #include "display/display.h"
 #include "fs/storage.h"
 #include "sensors/gps_reader.h"
+#include "sensors/ignition_bt.h"
 #include "data/sim.h"
 #include "data/logger.h"
 #include "net/wifi_log.h"
 #include "net/ota.h"
 #include "ui/screen_manager.h"
 #include "ui/screen_dash.h"
+#include "ui/screen_ignition.h"
 #include "ui/screen_vehicle.h"
 #include "ui/screen_gps.h"
 #include "ui/screen_storage.h"
+#include "ui/screen_settings.h"
 #include "ui/screen_cube.h"
 
 static ScreenManager mgr;
 
-static ScreenDash    screenDash;
-static ScreenVehicle screenVehicle;
-static ScreenGPS     screenGPS;
-static ScreenStorage screenStorage;
-static ScreenCube    screenCube;
+static ScreenDash     screenDash;
+static ScreenIgnition screenIgnition;
+static ScreenVehicle  screenVehicle;
+static ScreenGPS      screenGPS;
+static ScreenStorage  screenStorage;
+static ScreenSettings screenSettings;
+static ScreenCube     screenCube;
 
 void setup()
 {
@@ -32,28 +37,34 @@ void setup()
          (unsigned)(ESP.getFlashChipSize() / 1024),
          (unsigned)(ESP.getFreeHeap()      / 1024));
 
-    wlog("[1/4] display_init");
+    wlog("[1/5] display_init");
     display_init();
-    wlog("[1/4] display OK");
+    wlog("[1/5] display OK");
 
-    wlog("[2/4] storage_init");
+    wlog("[2/5] storage_init");
     storage_init();
     sd_init();
     logger_init();
-    wlog("[2/4] storage OK");
+    wlog("[2/5] storage OK");
 
-    wlog("[3/4] gps_init");
+    wlog("[3/5] gps_init");
     gps_init();
-    wlog("[3/4] GPS OK");
+    wlog("[3/5] GPS OK");
 
-    wlog("[4/4] screen pages");
-    mgr.addPage(&screenDash);     // 1 — Dashboard (dials)
-    mgr.addPage(&screenVehicle);  // 2 — Engine / fuel table
-    mgr.addPage(&screenGPS);      // 3 — GPS
-    mgr.addPage(&screenStorage);  // 4 — Storage / logging
-    mgr.addPage(&screenCube);     // 5 — Rotating cube demo
+    wlog("[4/5] ignition_bt_init");
+    ignition_bt_init();
+    wlog("[4/5] BLE OK");
+
+    wlog("[5/5] screen pages");
+    mgr.addPage(&screenDash);      // 1 — Dashboard (dials)
+    mgr.addPage(&screenIgnition);  // 2 — 123-ignition data + controls
+    mgr.addPage(&screenVehicle);   // 3 — Engine / fuel table
+    mgr.addPage(&screenGPS);       // 4 — GPS
+    mgr.addPage(&screenStorage);   // 5 — Storage / logging
+    mgr.addPage(&screenSettings);  // 6 — Settings (sim toggle)
+    mgr.addPage(&screenCube);      // 7 — Rotating cube demo
     mgr.begin();
-    wlog("[4/4] ScreenManager OK");
+    wlog("[5/5] ScreenManager OK");
 
     wlog("=== boot complete  heap %u KB ===",
          (unsigned)(ESP.getFreeHeap() / 1024));
@@ -66,13 +77,16 @@ void loop()
     wifi_log_update();
     ota_update();
     gps_update();
-    sim_update();     // overrides vdata when SIM_ENABLE 1; compiles away when 0
+    ignition_bt_update();
+    sim_update();      // writes vdata when sim is ON; skips when OFF or SIM_ENABLE=0
     logger_update();
     mgr.update();
 
     if (millis() - _lastHeartbeat > 30000) {
         _lastHeartbeat = millis();
-        wlog("[heartbeat] heap %u KB",
-             (unsigned)(ESP.getFreeHeap() / 1024));
+        wlog("[heartbeat] heap %u KB  ign=%s  sim=%s",
+             (unsigned)(ESP.getFreeHeap() / 1024),
+             ignition_bt_state_str(),
+             sim_running() ? "ON" : "OFF");
     }
 }

@@ -21,6 +21,15 @@ struct VehicleData {
     float  altitude_m  = 0.0f;
     bool   gps_valid   = false;
     char   timestamp[24] = "";  // "2024-01-15T14:32:07" or "T+1234s"
+
+    // Ignition (from 123-ignition BLE)
+    float ign_advance_deg  = 0.0f;  // ignition advance (° BTDC)
+    float ign_temp_c       = 0.0f;  // module temperature (°C)
+    float ign_voltage_v    = 0.0f;  // supply voltage (V)
+    float ign_pressure_kpa = 0.0f;  // MAP/vacuum (kPa)
+    float ign_ampere       = 0.0f;  // coil current (A)
+    bool  ign_connected    = false; // BLE link alive
+    bool  ign_tune_mode    = false; // tuning mode active
 };
 
 extern VehicleData vdata;

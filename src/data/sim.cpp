@@ -6,6 +6,11 @@
 #include <Arduino.h>
 #include <math.h>
 
+static bool _simOn = true;
+
+void sim_set(bool on) { _simOn = on; }
+bool sim_running()    { return _simOn; }
+
 // Drive cycle: accelerate 0→100 km/h over ACCEL_MS, hold briefly, then
 // decelerate back to 0 over DECEL_MS.  Repeats continuously.
 static constexpr uint32_t ACCEL_MS = 5000;
@@ -22,6 +27,8 @@ static float smoothstep(float t) { return t * t * (3.f - 2.f * t); }
 
 void sim_update()
 {
+    if (!_simOn) return;
+
     uint32_t t   = millis() % CYCLE_MS;
     float    spd = 0.f;
     float    thr = 0.f;
