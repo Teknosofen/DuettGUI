@@ -6,7 +6,7 @@
 #include <Arduino.h>
 #include <math.h>
 
-static bool _simOn = true;
+static bool _simOn = false;
 
 void sim_set(bool on) { _simOn = on; }
 bool sim_running()    { return _simOn; }

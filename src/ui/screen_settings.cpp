@@ -35,8 +35,19 @@ void ScreenSettings::drawStatic(lgfx::LovyanGFX& gfx, uint16_t /*w*/) {
     gfx.setTextSize(1);
     setGray(gfx);
     gfx.setCursor(20, 336); gfx.print("Simulation ON  \xBB  synthetic drive cycle (overrides all sensors)");
-    gfx.setCursor(20, 358); gfx.print("Simulation OFF + 123-ignition connected  \xBB  RPM from BLE");
-    gfx.setCursor(20, 380); gfx.print("Simulation OFF + no BLE  \xBB  RPM = 0");
+    gfx.setCursor(20, 354); gfx.print("Simulation OFF + 123-ignition connected  \xBB  RPM from BLE");
+    gfx.setCursor(20, 372); gfx.print("Simulation OFF + no BLE  \xBB  RPM = 0");
+
+    // Build info
+    Widget::hRule(gfx, 398, 800);
+    gfx.setFont(&lgfx::fonts::DejaVu12);
+    gfx.setTextSize(1);
+    setGray(gfx);
+    char build[64];
+    snprintf(build, sizeof(build), "Build: %s  %s", __DATE__, __TIME__);
+    int bw = (int)gfx.textWidth(build);
+    gfx.setCursor(800 - 20 - bw, 410);
+    gfx.print(build);
 }
 
 void ScreenSettings::drawSimBtn(lgfx::LovyanGFX& gfx) {
