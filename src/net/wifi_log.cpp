@@ -17,7 +17,7 @@ static uint32_t _total = 0;   // monotonically increasing; never wraps in practi
 static WebServer _srv(80);
 
 // Served once at GET /
-static const char PAGE[] PROGMEM = R"html(
+static const char PAGE[] = R"html(
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -120,7 +120,7 @@ setInterval(poll, 1000);
 
 static void handleRoot()
 {
-    _srv.send_P(200, "text/html", PAGE);
+    _srv.send(200, "text/html", PAGE);
 }
 
 static void handleLog()

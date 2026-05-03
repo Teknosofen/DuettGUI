@@ -18,9 +18,9 @@ void display_init()
     Serial.flush();
 
     // Visual self-test: RED → GREEN → BLUE → BLACK
-    display->fillScreen(TFT_RED);   delay(400);
-    display->fillScreen(TFT_GREEN); delay(400);
-    display->fillScreen(TFT_BLUE);  delay(400);
-    display->fillScreen(TFT_BLACK);
-    Serial.println("  colour test done");  Serial.flush();
+    // display->fillScreen(TFT_RED);   delay(400);
+    // display->fillScreen(TFT_GREEN); delay(400);
+    // display->fillScreen(TFT_BLUE);  delay(400);
+    // display->fillScreen(TFT_BLACK);
+    // Serial.println("  colour test done");  Serial.flush();
 }

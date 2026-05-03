@@ -6,9 +6,10 @@
 #include <Arduino.h>
 
 // ── UUIDs (from reverse-engineering of 123ignition TUNE+ firmware) ────────────
-static const char* SVC_UUID = "da2b84f1-6279-48de-bdc0-afbea0226079";
-static const char* RX_UUID  = "BF03260C-7205-4C25-AF43-93B1C299D159";  // write commands
-static const char* TX_UUID  = "18CDA784-4BD3-4370-85BB-BFED91EC86AF";  // notify data
+// 123ignition TUNE+ uses the standard Nordic UART Service (NUS)
+static const char* SVC_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+static const char* RX_UUID  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";  // write commands
+static const char* TX_UUID  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";  // notify data
 
 // ── Handshake commands ────────────────────────────────────────────────────────
 // Three commands sent in sequence after connecting (300 ms apart).
@@ -29,9 +30,8 @@ static NimBLEAddress            _devAddr;
 static bool                     _addrFound = false;
 static NimBLERemoteCharacteristic* _rxChar = nullptr;
 static NimBLERemoteCharacteristic* _txChar = nullptr;
-static uint8_t                  _hsStep    = 0;
-static uint32_t                 _hsMs      = 0;
-static uint32_t                 _retryMs   = 0;
+static uint32_t                 _retryMs      = 0;
+static uint32_t                 _keepaliveMs  = 0;
 static constexpr uint32_t       RETRY_MS   = 8000;
 static constexpr uint32_t       HS_GAP_MS  = 300;  // delay between handshake steps
 
@@ -114,17 +114,25 @@ static void parseStream(const uint8_t* data, size_t len) {
 
 // ── BLE callbacks ─────────────────────────────────────────────────────────────
 
+static uint32_t _notifyCount = 0;
+
 static void notifyCB(NimBLERemoteCharacteristic* /*pChar*/,
                      uint8_t* pData, size_t length, bool /*isNotify*/) {
+    _notifyCount++;
+    // Log first 8 notifications as hex so we can verify data and protocol
+    if (_notifyCount <= 8) {
+        char hex[64]; int n = 0;
+        for (size_t i = 0; i < length && n < 60; i++)
+            n += snprintf(hex + n, sizeof(hex) - n, "%02X ", pData[i]);
+        wlog("[ign] notify #%lu  len=%u  %s", _notifyCount, (unsigned)length, hex);
+    }
     parseStream(pData, length);
 }
 
 class ClientCB : public NimBLEClientCallbacks {
     void onConnect(NimBLEClient*) override {
-        wlog("[ign] BLE connected — starting handshake");
-        _state  = IgnBtState::HANDSHAKING;
-        _hsStep = 0;
-        _hsMs   = 0;
+        wlog("[ign] BLE connected");
+        // connectTask drives all post-connect work; nothing to do here
     }
     void onDisconnect(NimBLEClient*, int reason) override {
         wlog("[ign] BLE disconnected (reason %d) — will retry in %u s",
@@ -145,17 +153,139 @@ class ScanCB : public NimBLEScanCallbacks {
                          dev->isAdvertisingService(NimBLEUUID(SVC_UUID));
         bool matchName = dev->haveName() &&
                          strstr(dev->getName().c_str(), "123") != nullptr;
+
+        wlog("[ign] scan: '%s'  %s  RSSI=%d  svc=%s name=%s",
+             dev->haveName() ? dev->getName().c_str() : "(no name)",
+             dev->getAddress().toString().c_str(),
+             dev->getRSSI(),
+             matchSvc  ? "MATCH" : (dev->haveServiceUUID() ? "no" : "-"),
+             matchName ? "MATCH" : "no");
+
         if (matchSvc || matchName) {
-            wlog("[ign] found: %s  addr=%s",
-                 dev->getName().c_str(), dev->getAddress().toString().c_str());
+            wlog("[ign] >> SELECTED  addr=%s", dev->getAddress().toString().c_str());
             NimBLEDevice::getScan()->stop();
             _devAddr   = dev->getAddress();
             _addrFound = true;
             _state     = IgnBtState::CONNECTING;
         }
     }
+    void onScanEnd(const NimBLEScanResults& results, int reason) override {
+        wlog("[ign] scan ended  found=%d  reason=%d", results.getCount(), reason);
+    }
 };
 static ScanCB _scanCB;
+
+// ── FreeRTOS connect+setup task ───────────────────────────────────────────────
+// All blocking BLE operations run here so loop()/WiFi are never stalled.
+
+static bool setupChars() {
+    // Try the known service UUID first; fall back to scanning all services.
+    // The advertised service UUID varies across firmware versions.
+    NimBLERemoteService* svc = _client->getService(SVC_UUID);
+    if (!svc) {
+        wlog("[ign] known service UUID not found — scanning all services");
+        auto& svcs = _client->getServices(true);
+        wlog("[ign] device exposes %d service(s):", (int)svcs.size());
+        for (auto* s : svcs) {
+            auto* rx = s->getCharacteristic(RX_UUID);
+            auto* tx = s->getCharacteristic(TX_UUID);
+            wlog("[ign]   %s  rx=%s tx=%s",
+                 s->getUUID().toString().c_str(),
+                 rx ? "YES" : "no", tx ? "YES" : "no");
+            if (rx && tx && !svc) svc = s;
+        }
+        if (!svc) { wlog("[ign] no service with RX+TX found"); return false; }
+        wlog("[ign] using service %s", svc->getUUID().toString().c_str());
+    }
+    _rxChar = svc->getCharacteristic(RX_UUID);
+    _txChar = svc->getCharacteristic(TX_UUID);
+    if (!_rxChar) { wlog("[ign] RX char not found"); return false; }
+    if (!_txChar) { wlog("[ign] TX char not found"); return false; }
+    wlog("[ign] chars OK");
+    return true;
+}
+
+static void connectTask(void*) {
+    if (!_client) {
+        _client = NimBLEDevice::createClient();
+        _client->setClientCallbacks(&_clientCB, false);
+        _client->setConnectionParams(12, 12, 0, 600);  // 6 s supervision timeout
+    }
+
+    wlog("[ign] connecting to %s  heap=%u KB",
+         _devAddr.toString().c_str(), (unsigned)(ESP.getFreeHeap() / 1024));
+    bool ok = _client->connect(_devAddr);
+    wlog("[ign] connect %s", ok ? "OK" : "FAILED");
+    if (!ok) {
+        NimBLEDevice::deleteClient(_client);
+        _client  = nullptr;
+        _state   = IgnBtState::IDLE;
+        _retryMs = millis();
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // All post-connect work runs here — never in the Arduino loop task.
+    _state = IgnBtState::HANDSHAKING;
+
+    if (!setupChars()) {
+        _client->disconnect();
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // Log full property picture for both characteristics
+    wlog("[ign] RX(02) canWrite=%s canWriteNoRsp=%s canNotify=%s canRead=%s",
+         _rxChar->canWrite()           ? "yes" : "no",
+         _rxChar->canWriteNoResponse() ? "yes" : "no",
+         _rxChar->canNotify()          ? "yes" : "no",
+         _rxChar->canRead()            ? "yes" : "no");
+    wlog("[ign] TX(03) canWrite=%s canNotify=%s canIndicate=%s canRead=%s",
+         _txChar->canWrite()           ? "yes" : "no",
+         _txChar->canNotify()          ? "yes" : "no",
+         _txChar->canIndicate()        ? "yes" : "no",
+         _txChar->canRead()            ? "yes" : "no");
+
+    // Attempt encrypted/bonded connection — device may require pairing before streaming
+    wlog("[ign] requesting secure connection...");
+    bool sec = _client->secureConnection();
+    wlog("[ign] secure: %s", sec ? "ok" : "not required / failed");
+
+    // Subscribe to TX (6e400003) — and also try RX (6e400002) in case roles are swapped
+    bool subTx = false, subRx = false;
+    if (_txChar->canNotify())   subTx = _txChar->subscribe(true,  notifyCB);
+    if (_txChar->canIndicate()) subTx = _txChar->subscribe(false, notifyCB);
+    if (_rxChar->canNotify())   subRx = _rxChar->subscribe(true,  notifyCB);
+    wlog("[ign] subscribe TX=%s RX=%s", subTx ? "ok" : "no", subRx ? "ok" : "no");
+    if (!subTx && !subRx) {
+        wlog("[ign] no subscribe succeeded — disconnecting");
+        _client->disconnect();
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // Full 3-step handshake after subscribe.  All writes are write-command (no response)
+    // which is the standard NUS transport mode.  500 ms initial settle, 300 ms between steps.
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    _rxChar->writeValue(CMD_KEEPALIVE,  sizeof(CMD_KEEPALIVE),  false);
+    wlog("[ign] hs 1/3 keepalive");
+    vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
+
+    _rxChar->writeValue(CMD_ADV_CURVE,  sizeof(CMD_ADV_CURVE),  false);
+    wlog("[ign] hs 2/3 adv-curve");
+    vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
+
+    _rxChar->writeValue(CMD_CONFIG,     sizeof(CMD_CONFIG),     false);
+    wlog("[ign] hs 3/3 config");
+
+    _notifyCount  = 0;
+    _keepaliveMs  = millis();
+    vdata.ign_connected = true;
+    _state = IgnBtState::ACTIVE;
+    wlog("[ign] ACTIVE — streaming data");
+    vTaskDelete(nullptr);
+}
 
 // ── State machine helpers ─────────────────────────────────────────────────────
 
@@ -168,62 +298,6 @@ static void startScan() {
     scan->setActiveScan(true);
     scan->start(0, false);   // continuous, non-blocking
     _state = IgnBtState::SCANNING;
-}
-
-// Runs in a short-lived FreeRTOS task so loop() stays responsive during connect
-static void connectTask(void*) {
-    if (!_client) {
-        _client = NimBLEDevice::createClient();
-        _client->setClientCallbacks(&_clientCB, false);
-        _client->setConnectionParams(12, 12, 0, 51);  // fast connection params
-    }
-    wlog("[ign] connecting to %s ...", _devAddr.toString().c_str());
-    if (!_client->connect(_devAddr)) {
-        wlog("[ign] connect failed");
-        NimBLEDevice::deleteClient(_client);
-        _client  = nullptr;
-        _state   = IgnBtState::IDLE;
-        _retryMs = millis();
-    }
-    // On success, ClientCB::onConnect() sets state = HANDSHAKING
-    vTaskDelete(nullptr);
-}
-
-static bool setupChars() {
-    NimBLERemoteService* svc = _client->getService(SVC_UUID);
-    if (!svc) { wlog("[ign] service not found"); return false; }
-    _rxChar = svc->getCharacteristic(RX_UUID);
-    _txChar = svc->getCharacteristic(TX_UUID);
-    if (!_rxChar || !_txChar) { wlog("[ign] characteristics not found"); return false; }
-    return true;
-}
-
-static void doHandshake() {
-    uint32_t now = millis();
-    if (now - _hsMs < HS_GAP_MS) return;
-    _hsMs = now;
-
-    if (_hsStep == 0) {
-        if (!setupChars()) { _client->disconnect(); return; }
-        _rxChar->writeValue(CMD_KEEPALIVE, sizeof(CMD_KEEPALIVE), false);
-        wlog("[ign] hs 1/3 keepalive");
-        _hsStep = 1;
-    } else if (_hsStep == 1) {
-        _rxChar->writeValue(CMD_ADV_CURVE, sizeof(CMD_ADV_CURVE), false);
-        wlog("[ign] hs 2/3 advance curve");
-        _hsStep = 2;
-    } else {
-        _rxChar->writeValue(CMD_CONFIG, sizeof(CMD_CONFIG), false);
-        wlog("[ign] hs 3/3 config");
-        if (!_txChar->subscribe(true, notifyCB)) {
-            wlog("[ign] subscribe failed");
-            _client->disconnect();
-            return;
-        }
-        vdata.ign_connected = true;
-        _state = IgnBtState::ACTIVE;
-        wlog("[ign] ACTIVE — streaming data");
-    }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -245,18 +319,18 @@ void ignition_bt_update() {
             break;
 
         case IgnBtState::SCANNING:
-            break; // ScanCB::onResult drives transition
+            break; // ScanCB::onDiscovered drives transition
 
         case IgnBtState::CONNECTING:
             if (_addrFound) {
                 _addrFound = false;
-                xTaskCreate(connectTask, "ign_conn", 4096, nullptr, 1, nullptr);
+                wlog("[ign] spawning connect task");
+                xTaskCreate(connectTask, "ign_conn", 8192, nullptr, 1, nullptr);
             }
             break;
 
         case IgnBtState::HANDSHAKING:
-            doHandshake();
-            break;
+            break; // connectTask drives this — loop must not block here
 
         case IgnBtState::ACTIVE:
             if (_client && !_client->isConnected()) {
@@ -264,6 +338,13 @@ void ignition_bt_update() {
                 vdata.ign_connected = false;
                 _state   = IgnBtState::IDLE;
                 _retryMs = millis();
+                break;
+            }
+            // Keepalive CR every 20 s — prevents device-side idle timeout
+            if (millis() - _keepaliveMs >= 20000) {
+                _keepaliveMs = millis();
+                if (_rxChar)
+                    _rxChar->writeValue(CMD_KEEPALIVE, sizeof(CMD_KEEPALIVE), false);
             }
             break;
 

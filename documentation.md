@@ -724,11 +724,13 @@ Integrates the **123ignition TUNE+** electronic ignition module directly into th
 
 ### BLE identifiers
 
+The 123ignition TUNE+ uses the **standard Nordic UART Service (NUS)** — verified by enumerating all services the device exposes after connecting (see Appendix A).
+
 | Item | UUID |
 |---|---|
-| Service | `da2b84f1-6279-48de-bdc0-afbea0226079` |
-| RX characteristic (write commands to module) | `BF03260C-7205-4C25-AF43-93B1C299D159` |
-| TX characteristic (notifications from module) | `18CDA784-4BD3-4370-85BB-BFED91EC86AF` |
+| Service (NUS) | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` |
+| RX characteristic (write commands to module) | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
+| TX characteristic (notifications from module) | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` |
 
 The scan matches by service UUID first; also accepts any advertising device whose name contains `"123"` as a fallback.
 
@@ -750,15 +752,17 @@ The connect attempt runs in a short-lived FreeRTOS task so `loop()` stays respon
 
 ### Handshake sequence
 
-Three commands are written to the RX characteristic (300 ms apart) before notifications start:
+> **Status: unverified.** The device connects and subscribes successfully, but has not yet been observed to send notifications. The commands below are candidates derived from other 123ignition documentation. The actual initialization protocol must be captured from the official 123Tune+ Android app (nRF Connect or Android HCI snoop log — see Appendix A, §A.7).
+
+Three commands are written to the RX characteristic after subscribing to TX notifications (300 ms apart):
 
 | Step | Bytes | Meaning |
 |---|---|---|
-| 1 | `0x0D` | Keepalive |
+| 1 | `0x0D` | Keepalive (CR) |
 | 2 | `0x31 0x30 0x40 0x0D` — `"10@\r"` | Request advance curve |
 | 3 | `0x31 0x31 0x40 0x0D` — `"11@\r"` | Request config + PIN |
 
-After step 3, the TX characteristic CCCD is written to enable notifications. `vdata.ign_connected` is set `true` and data flows.
+A periodic keepalive (`0x0D`) is sent every 20 s while ACTIVE to prevent the device's idle timeout. `vdata.ign_connected` is set `true` after the handshake writes.
 
 ### Packet format
 
@@ -1072,3 +1076,169 @@ OTA can only update a board that already has OTA-capable firmware. The very firs
 3. In VS Code: use the `usb` environment → **Upload** (or `pio run -e usb -t upload`).
 4. Press **RESET** to boot normally.
 5. Reconnect the GPS.
+
+---
+
+## Appendix A — 123-ignition BLE Fault-finding Log
+
+This appendix records the full diagnostic process carried out to integrate the 123ignition TUNE+ over BLE, including every dead end and what each log line revealed. Keep this as a reference if the BLE integration stops working after a firmware update on the ignition module or a NimBLE library upgrade.
+
+---
+
+### A.1  What was found vs. what the original notes said
+
+The initial implementation was based on reverse-engineering notes that turned out to contain incorrect information:
+
+| Item | Original notes | Reality (discovered via diagnostics) |
+|---|---|---|
+| Service UUID | `da2b84f1-6279-48de-bdc0-afbea0226079` | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` (Nordic UART Service) |
+| RX characteristic | `BF03260C-7205-4C25-AF43-93B1C299D159` | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
+| TX characteristic | `18CDA784-4BD3-4370-85BB-BFED91EC86AF` | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` |
+| NimBLE version | `^1.4.3` | `^2.0.0` required (1.4.x crashes at runtime on IDF 5.x) |
+
+The 123ignition TUNE+ uses the **standard Nordic UART Service (NUS)** — a common BLE serial-over-BLE transport used by many embedded devices. Service `6e400001`, RX `6e400002` (client writes), TX `6e400003` (device notifies).
+
+---
+
+### A.2  NimBLE version issue (display blank + WiFi shows nothing)
+
+**Symptom:** After adding NimBLE to the project, the display went blank and the WiFi console loaded but showed no log lines — as though `setup()` was crashing before `mgr.begin()`.
+
+**Root cause:** `h2zero/NimBLE-Arduino @ ^1.4.3` compiles against IDF 4.x headers but the pioarduino platform runs IDF 5.x. The NimBLE internal structs differ between IDF versions, causing a runtime panic during `NimBLEDevice::init()`.
+
+**Fix:** Change `platformio.ini` to `h2zero/NimBLE-Arduino @ ^2.0.0`.
+
+**API breaking changes between 1.4.x and 2.x:**
+
+| 1.4.x | 2.x |
+|---|---|
+| `NimBLEAdvertisedDeviceCallbacks` | `NimBLEScanCallbacks` |
+| `onResult(NimBLEAdvertisedDevice*)` | `onDiscovered(const NimBLEAdvertisedDevice*)` |
+| `scan->setAdvertisedDeviceCallbacks(cb)` | `scan->setScanCallbacks(cb, false)` |
+| `onDisconnect(NimBLEClient*)` | `onDisconnect(NimBLEClient*, int reason)` |
+
+---
+
+### A.3  WiFi console showing blank page
+
+**Symptom:** Browser connected to `192.168.4.1` but the page was empty — HTTP 200 returned but body was zero bytes.
+
+**Root cause:** `handleRoot()` used `_srv.send_P(200, "text/html", PAGE)` with a PROGMEM-declared string. In arduino-esp32 3.x on IDF 5.x, `send_P` can silently produce an empty body for large strings.
+
+**Fix:** Remove `PROGMEM` from the `PAGE[]` declaration and use `_srv.send(200, "text/html", PAGE)`.
+
+---
+
+### A.4  Service UUID mismatch — all 6 services logged
+
+After fixing the UUIDs (step A.1 was not yet done), connecting succeeded but service discovery failed. The device's actual services were logged:
+
+```
+[ign]   0x1800  rx=no tx=no      — Generic Access
+[ign]   0x1801  rx=no tx=no      — Generic Attribute
+[ign]   6e400001-b5a3-f393-e0a9-e50e24dcca9e  rx=no tx=no   ← NUS!
+[ign]   0x1804  rx=no tx=no      — TX Power
+[ign]   0x180a  rx=no tx=no      — Device Information
+[ign]   0x180f  rx=no tx=no      — Battery
+[ign] no service with RX+TX found
+```
+
+The `rx=no tx=no` on the NUS service was because the old characteristic UUIDs were still wrong. Once all three UUIDs were updated to the NUS values, `setupChars()` succeeded.
+
+---
+
+### A.5  Blocking GATT operations stalling WiFi
+
+**Symptom:** After connecting and completing the handshake, the WiFi AP took ~60 s to appear and eventually stopped responding entirely.
+
+**Root cause:** `setupChars()` — which calls `_client->getService()` and `_client->getServices()` — ran in the Arduino loop task. These are synchronous GATT discovery calls that block for 200–800 ms each. During that time `wifi_log_update()` (`_srv.handleClient()`) could not run, starving the WiFi/TCP stack.
+
+**Fix:** Move **all** post-connect work (service discovery, characteristic lookup, handshake writes, notify subscribe) into the FreeRTOS `connectTask`. The Arduino loop only ever hits `break` during HANDSHAKING state. Stack size was increased from 4096 to 8192 bytes to accommodate NimBLE's internal GATT stack.
+
+---
+
+### A.6  Characteristics confirmed correct — still no notifications
+
+After fixing all UUIDs and moving GATT ops to the task, the log confirmed a clean connection:
+
+```
+[ign] RX(02) canWrite=yes canWriteNoRsp=yes canNotify=no canRead=no
+[ign] TX(03) canWrite=no  canNotify=yes     canIndicate=no canRead=no
+[ign] secure: not required / failed
+[ign] subscribe TX=ok  RX=no
+[ign] ACTIVE — streaming data
+```
+
+But `notify #1` never appeared in any log session. The device connects, accepts the CCCD write (subscription), accepts all handshake writes, then sends **zero notifications** before disconnecting with reason 520 (supervision timeout) after ~45 s.
+
+**What was ruled out:**
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| Wrong notification type (indicate vs notify) | Checked `canNotify` / `canIndicate`; tried both | `canNotify=yes`, subscribe TX=ok |
+| Pairing/bonding required | Called `_client->secureConnection()` | `secure: not required / failed` — no pairing needed |
+| RX/TX roles swapped | Tried subscribing to `6e400002` as well | `subscribe RX=no` — RX has no notify property |
+| Display bug (data arrives but not shown) | Verified `notifyCB` logs first 8 raw hex notifications | Callback never called — confirmed BLE side issue |
+| Sim data masking BLE | Turned sim OFF, checked data | Fields go to 0 — display is correct, no BLE data arrives |
+| Wrong handshake command order | Tried: commands-first, subscribe-first, no commands, single CR | None triggered notifications |
+| Wrong write type | Tried write-with-response (`true`) and write-command (`false`) | Both accepted; no difference in outcome |
+| Connection supervision timeout | Added 20 s keepalive CR in ACTIVE loop | Connection lasts longer but still no data |
+
+---
+
+### A.7  Current status and next steps
+
+**State as of last session:** The 123ignition TUNE+ connects reliably, service and characteristics are found correctly, subscription succeeds, and the connection stays up. Zero BLE notifications are received despite the engine running.
+
+**Most likely remaining cause:** The device requires a proprietary initialization command sequence that differs from the `\r` / `"10@\r"` / `"11@\r"` commands used by the original reverse-engineering notes. The correct sequence is not yet known.
+
+**How to find the correct commands — two options:**
+
+**Option 1 — nRF Connect app (easiest)**
+
+1. Ensure DuettGUI is powered off (device only supports one BLE connection).
+2. Install **nRF Connect** (Nordic Semiconductor) on iOS or Android.
+3. Scan → connect to `123\TUNE+`.
+4. Expand service `6e400001` → TX characteristic `6e400003` → tap the subscribe/notify icon.
+5. Watch for any incoming notification. Note exact bytes.
+6. Try writing to RX characteristic `6e400002`: start with `0D` (CR), then `3F 0D` (`?\r`), `73 0D` (`s\r`), etc. in hex write mode.
+7. Report which write (if any) triggers a TX notification.
+
+**Option 2 — Android HCI snoop log (complete capture)**
+
+1. Android: Settings → Developer options → Enable **Bluetooth HCI snoop log**.
+2. Connect with the official 123Tune+ app and let data flow for ~30 s.
+3. Disable HCI snoop log to flush.
+4. Pull the log: `adb pull /sdcard/btsnoop_hci.log` (path may vary by device/Android version).
+5. Open in **Wireshark**, filter `btatt`.
+6. Find Write operations to handle matching `6e400002` — these are the exact bytes the app sends.
+7. Update `CMD_KEEPALIVE`, `CMD_ADV_CURVE`, `CMD_CONFIG` in `ignition_bt.cpp` with the captured values.
+
+**Note:** The two apps cannot run simultaneously — the 123TUNE+ only supports one BLE connection at a time. Always ensure the 123Tune+ app is fully closed before DuettGUI boots, or DuettGUI will fail to connect (and vice versa).
+
+---
+
+### A.8  Diagnostic log lines reference
+
+The following `wlog()` lines are present in `ignition_bt.cpp` and are useful for ongoing diagnosis:
+
+| Log line | Meaning |
+|---|---|
+| `scan: 'NAME' ADDR RSSI=X svc=MATCH/no/- name=MATCH/no` | Every BLE device seen during scan; confirms module is advertising |
+| `>> SELECTED addr=...` | Device matched by name — connect task will be spawned |
+| `spawning connect task` | `xTaskCreate` called; task will attempt connection |
+| `connecting to ... heap=X KB` | Task started; heap shown to detect memory pressure |
+| `connect OK / FAILED` | BLE connection result |
+| `BLE connected` | `onConnect` callback fired (connection established) |
+| `chars OK` | Service and both characteristics found |
+| `TX canNotify=yes canIndicate=no` | Characteristic properties; confirms correct UUID |
+| `secure: ok / not required / failed` | Result of `secureConnection()` attempt |
+| `subscribe TX=ok RX=no` | CCCD written for TX; RX has no notify property (expected) |
+| `hs 1/3 keepalive` | Handshake CR sent |
+| `hs 2/3 adv-curve` | `"10@\r"` sent |
+| `hs 3/3 config` | `"11@\r"` sent |
+| `ACTIVE — streaming data` | State machine reached ACTIVE; `vdata.ign_connected = true` |
+| `notify #N len=X XX XX XX ...` | First 8 notifications logged with raw hex (callback fired) |
+| `BLE disconnected (reason 520)` | Supervision timeout — device stopped responding to link-layer events |
+| `BLE disconnected (reason 534)` | Local disconnect — our code called `_client->disconnect()` |
+| `scan ended found=N reason=N` | Scan cycle ended (after `stop()` or duration expiry) |

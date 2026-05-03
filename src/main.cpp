@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include "display/display.h"
 #include "fs/storage.h"
 #include "sensors/gps_reader.h"
@@ -51,9 +52,12 @@ void setup()
     gps_init();
     wlog("[3/5] GPS OK");
 
-    wlog("[4/5] ignition_bt_init");
+    wlog("[4/5] ignition_bt_init  heap=%u KB", (unsigned)(ESP.getFreeHeap() / 1024));
     ignition_bt_init();
-    wlog("[4/5] BLE OK");
+    wlog("[4/5] BLE OK  heap=%u KB  AP-IP=%s  AP-stations=%d",
+         (unsigned)(ESP.getFreeHeap() / 1024),
+         WiFi.softAPIP().toString().c_str(),
+         WiFi.softAPgetStationNum());
 
     wlog("[5/5] screen pages");
     mgr.addPage(&screenDash);      // 1 — Dashboard (dials)
