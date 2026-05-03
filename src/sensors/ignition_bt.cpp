@@ -212,19 +212,23 @@ static bool setupChars() {
 
     if (!svc) { wlog("[ign] NUS service not found"); return false; }
 
-    // Explicitly discover characteristics within the NUS service and log them all.
+    // Discover characteristics and pick RX/TX by strstr — same NimBLE 2.x byte-order
+    // issue affects getCharacteristic(uuid) lookups, so we match from the returned list.
     auto& chars = svc->getCharacteristics(true);
     wlog("[ign] NUS has %d char(s):", (int)chars.size());
     for (auto* c : chars) {
+        const std::string custr = c->getUUID().toString();
         wlog("[ign]   %s  write=%s notify=%s indicate=%s",
-             c->getUUID().toString().c_str(),
-             c->canWrite()           ? "yes" : "no",
-             c->canNotify()          ? "yes" : "no",
-             c->canIndicate()        ? "yes" : "no");
+             custr.c_str(),
+             c->canWrite()    ? "yes" : "no",
+             c->canNotify()   ? "yes" : "no",
+             c->canIndicate() ? "yes" : "no");
+        if (strstr(custr.c_str(), "6e400002") || strstr(custr.c_str(), "6E400002"))
+            _rxChar = c;
+        if (strstr(custr.c_str(), "6e400003") || strstr(custr.c_str(), "6E400003"))
+            _txChar = c;
     }
 
-    _rxChar = svc->getCharacteristic(RX_UUID);
-    _txChar = svc->getCharacteristic(TX_UUID);
     if (!_rxChar) { wlog("[ign] RX char (6e400002) not found"); return false; }
     if (!_txChar) { wlog("[ign] TX char (6e400003) not found"); return false; }
     wlog("[ign] chars OK");
