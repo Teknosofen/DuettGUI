@@ -201,8 +201,12 @@ static bool setupChars() {
     NimBLERemoteService* svc = nullptr;
     for (auto* s : svcs) {
         const std::string ustr = s->getUUID().toString();
-        bool isNus = (strcasecmp(ustr.c_str(), SVC_UUID) == 0);
-        wlog("[ign]   %s%s", ustr.c_str(), isNus ? "  <- NUS" : "");
+        // Match by substring — NimBLE 2.x operator== and strcasecmp both fail due
+        // to internal byte-order mismatch between wire-received and string-parsed UUIDs.
+        // "6e400001" is unique to the Nordic UART Service.
+        bool isNus = (strstr(ustr.c_str(), "6e400001") != nullptr) ||
+                     (strstr(ustr.c_str(), "6E400001") != nullptr);
+        wlog("[ign]   [len=%d] %s%s", (int)ustr.size(), ustr.c_str(), isNus ? "  <- NUS" : "");
         if (isNus) svc = s;
     }
 
