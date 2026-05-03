@@ -724,13 +724,17 @@ Integrates the **123ignition TUNE+** electronic ignition module directly into th
 
 ### BLE identifiers
 
-The 123ignition TUNE+ uses the **standard Nordic UART Service (NUS)** — verified by enumerating all services the device exposes after connecting (see Appendix A).
+The 123ignition TUNE+ exposes a **proprietary 128-bit service** (not Nordic UART, despite a previous theory). UUIDs below are taken from the published, working ESP32 simulator [iafilius/123Tune-plus-Simulator](https://github.com/iafilius/123Tune-plus-Simulator), which is accepted byte-for-byte by the official iOS 123Tune+ app and is therefore authoritative.
 
-| Item | UUID |
-|---|---|
-| Service (NUS) | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` |
-| RX characteristic (write commands to module) | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
-| TX characteristic (notifications from module) | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` |
+| Item | UUID | Properties |
+|---|---|---|
+| Primary service | `da2b84f1-6279-48de-bdc0-afbea0226079` | — |
+| Info characteristic | `99564a02-dc01-4d3c-b04e-3bb1ef0571b2` | read |
+| Body characteristic | `a87988b9-694c-479c-900e-95dfa6c00a24` | read/write |
+| **RX (commands → module)** | `bf03260c-7205-4c25-af43-93b1c299d159` | write |
+| **TX (notifications → host)** | `18cda784-4bd3-4370-85bb-bfed91ec86af` | notify |
+| Battery service | `0x180F` (standard) | — |
+| Battery level | `0x2A19` (standard) | read |
 
 The scan matches by service UUID first; also accepts any advertising device whose name contains `"123"` as a fallback.
 
@@ -752,17 +756,22 @@ The connect attempt runs in a short-lived FreeRTOS task so `loop()` stays respon
 
 ### Handshake sequence
 
-> **Status: unverified.** The device connects and subscribes successfully, but has not yet been observed to send notifications. The commands below are candidates derived from other 123ignition documentation. The actual initialization protocol must be captured from the official 123Tune+ Android app (nRF Connect or Android HCI snoop log — see Appendix A, §A.7).
+> **Source:** the six-step handshake below is documented in `iafilius/123Tune-plus-Simulator` (`ESP32-Arduino/ESP32_123Tune_plus_server/ble.ino`). The simulator's own comment is the smoking gun: *"All Meter values show up after command 6 !!! — Service command 'v@' (Version Service Command) returns voltage, Temp, pressure and hardware/software version."* The previous 3-step handshake stopped at step 3 and is the reason no notifications were received.
 
-Three commands are written to the RX characteristic after subscribing to TX notifications (300 ms apart):
+After subscribing to TX notifications, six commands are written to the RX characteristic in order with ~300 ms gaps. Live data only begins after step 6.
 
-| Step | Bytes | Meaning |
-|---|---|---|
-| 1 | `0x0D` | Keepalive (CR) |
-| 2 | `0x31 0x30 0x40 0x0D` — `"10@\r"` | Request advance curve |
-| 3 | `0x31 0x31 0x40 0x0D` — `"11@\r"` | Request config + PIN |
+| Step | Bytes | ASCII | Purpose |
+|---|---|---|---|
+| 1 | `0D` | `\r` | Keepalive / sync |
+| 2 | `31 30 40 0D` | `10@\r` | Advance curve points 1–7 (RPM/degrees) |
+| 3 | `31 31 40 0D` | `11@\r` | Advance curve points 8–10 + PIN + RPM limit |
+| 4 | `31 32 40 0D` | `12@\r` | Vacuum/MAP curve points 1–7 |
+| 5 | `31 33 40 0D` | `13@\r` | Vacuum/MAP curve points 8–10 |
+| 6 | `76 40 0D` | `v@\r` | **Version + live data trigger** — starts streaming |
 
-A periodic keepalive (`0x0D`) is sent every 20 s while ACTIVE to prevent the device's idle timeout. `vdata.ign_connected` is set `true` after the handshake writes.
+The Info and Body characteristics are read once before step 1, mimicking the iOS app (some firmware revisions gate the streaming on these reads).
+
+A periodic keepalive (`0x0D`) is sent every 20 s while ACTIVE to prevent the device's idle timeout. Padding bytes `0x24` may appear on either side of any command and are stripped by the parser.
 
 ### Packet format
 
@@ -1186,35 +1195,28 @@ But `notify #1` never appeared in any log session. The device connects, accepts 
 
 ---
 
-### A.7  Current status and next steps
+### A.7  Resolution — published reverse-engineering
 
-**State as of last session:** The 123ignition TUNE+ connects reliably, service and characteristics are found correctly, subscription succeeds, and the connection stays up. Zero BLE notifications are received despite the engine running.
+**State before resolution:** The 123ignition TUNE+ connected reliably, characteristics were found, subscription succeeded and the link stayed up, but zero BLE notifications were received. Two earlier theories (Nordic UART UUIDs; only 3 handshake commands) were both wrong.
 
-**Most likely remaining cause:** The device requires a proprietary initialization command sequence that differs from the `\r` / `"10@\r"` / `"11@\r"` commands used by the original reverse-engineering notes. The correct sequence is not yet known.
+**Resolution:** A complete, working reverse-engineering exists at [github.com/iafilius/123Tune-plus-Simulator](https://github.com/iafilius/123Tune-plus-Simulator) (Arjan Filius, 2017–2019). It is an ESP32 simulator that successfully impersonates a real 123\TUNE+ to the official iOS client. Two facts from that codebase fixed our streaming problem:
 
-**How to find the correct commands — two options:**
+1. The service uses **proprietary 128-bit UUIDs**, not Nordic UART. The actual UUIDs are documented in the BLE identifiers table at the top of the 123-ignition BLE section.
+2. The device requires **six** handshake commands, not three. Live notifications begin only after the final `v@\r` (Version Service Command). The simulator code states this directly: *"All Meter values show up after command 6"*.
 
-**Option 1 — nRF Connect app (easiest)**
+Both fixes are now applied in `ignition_bt.cpp`.
 
-1. Ensure DuettGUI is powered off (device only supports one BLE connection).
-2. Install **nRF Connect** (Nordic Semiconductor) on iOS or Android.
-3. Scan → connect to `123\TUNE+`.
-4. Expand service `6e400001` → TX characteristic `6e400003` → tap the subscribe/notify icon.
-5. Watch for any incoming notification. Note exact bytes.
-6. Try writing to RX characteristic `6e400002`: start with `0D` (CR), then `3F 0D` (`?\r`), `73 0D` (`s\r`), etc. in hex write mode.
-7. Report which write (if any) triggers a TX notification.
+**Optional verification using a phone app**
 
-**Option 2 — Android HCI snoop log (complete capture)**
+If the device firmware revision differs from the one Filius reverse-engineered (his is `41-10-45`), the protocol grammar may have changed. To verify:
 
-1. Android: Settings → Developer options → Enable **Bluetooth HCI snoop log**.
-2. Connect with the official 123Tune+ app and let data flow for ~30 s.
-3. Disable HCI snoop log to flush.
-4. Pull the log: `adb pull /sdcard/btsnoop_hci.log` (path may vary by device/Android version).
-5. Open in **Wireshark**, filter `btatt`.
-6. Find Write operations to handle matching `6e400002` — these are the exact bytes the app sends.
-7. Update `CMD_KEEPALIVE`, `CMD_ADV_CURVE`, `CMD_CONFIG` in `ignition_bt.cpp` with the captured values.
+*Option 1 — nRF Connect:* Power off DuettGUI (the device only accepts one BLE link). Install nRF Connect, scan and connect to `123\TUNE+`, expand service `da2b84f1…`, subscribe to TX `18cda784…`, then write `0D`, `31 30 40 0D`, `31 31 40 0D`, `31 32 40 0D`, `31 33 40 0D`, `76 40 0D` to RX `bf03260c…` with ~300 ms gaps. Notifications should start flowing after the last write.
 
-**Note:** The two apps cannot run simultaneously — the 123TUNE+ only supports one BLE connection at a time. Always ensure the 123Tune+ app is fully closed before DuettGUI boots, or DuettGUI will fail to connect (and vice versa).
+*Option 2 — Android HCI snoop log:* Settings → Developer options → enable Bluetooth HCI snoop log. Run the official 123Tune+ app for ~30 s with the engine cranking. Disable the log to flush, pull `/sdcard/btsnoop_hci.log`, open in Wireshark with filter `btatt`, look for Write operations to handle matching `bf03260c…`.
+
+**Security note:** The simulator's author refuses to use the device on a real car because of an unpatched authentication weakness — the PIN is checked client-side only. The vendor was notified in 2018 with no firmware fix issued. Treat the BLE link as untrusted and never expose the ignition module's BLE radio outside the car.
+
+**One BLE link only:** The device accepts a single connection. Always fully close the 123Tune+ phone app before DuettGUI boots, or DuettGUI will fail to connect (and vice versa).
 
 ---
 

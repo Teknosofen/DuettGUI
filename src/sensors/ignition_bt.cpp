@@ -5,18 +5,28 @@
 #include <NimBLEDevice.h>
 #include <Arduino.h>
 
-// ── UUIDs (from reverse-engineering of 123ignition TUNE+ firmware) ────────────
-// 123ignition TUNE+ uses the standard Nordic UART Service (NUS)
-static const char* SVC_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-static const char* RX_UUID  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";  // write commands
-static const char* TX_UUID  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";  // notify data
+// ── UUIDs (from iafilius/123Tune-plus-Simulator, ESP32 reverse-engineering port) ─
+// Custom 128-bit UUIDs published by 123ignition TUNE+ firmware. The simulator
+// re-creates these byte-for-byte and is accepted by the official iOS 123Tune+
+// app, so they are considered authoritative.
+static const char* SVC_UUID  = "da2b84f1-6279-48de-bdc0-afbea0226079";
+static const char* INFO_UUID = "99564a02-dc01-4d3c-b04e-3bb1ef0571b2";  // read
+static const char* BODY_UUID = "a87988b9-694c-479c-900e-95dfa6c00a24";  // read/write
+static const char* RX_UUID   = "bf03260c-7205-4c25-af43-93b1c299d159";  // write commands
+static const char* TX_UUID   = "18cda784-4bd3-4370-85bb-bfed91ec86af";  // notify data
 
 // ── Handshake commands ────────────────────────────────────────────────────────
-// Three commands sent in sequence after connecting (300 ms apart).
-// The device starts streaming RPM/Advance/Temp/Voltage notifications after step 3.
+// Six commands sent in sequence after subscribing to TX (300 ms apart).
+// Live RPM/Advance/Temp/Voltage/Pressure/Ampere notifications begin AFTER the
+// final "v@\r" — see iafilius/123Tune-plus-Simulator ble.ino:
+//   // All Meter values show up after command 6 !!!
+//   // Service command 'v@' (Version Service Command)
 static const uint8_t CMD_KEEPALIVE[]     = { 0x0D };
-static const uint8_t CMD_ADV_CURVE[]     = { 0x31, 0x30, 0x40, 0x0D }; // "10@\r"
-static const uint8_t CMD_CONFIG[]        = { 0x31, 0x31, 0x40, 0x0D }; // "11@\r"
+static const uint8_t CMD_ADV_CURVE_LO[]  = { 0x31, 0x30, 0x40, 0x0D }; // "10@\r" advance curve pts 1-7
+static const uint8_t CMD_ADV_CURVE_HI[]  = { 0x31, 0x31, 0x40, 0x0D }; // "11@\r" pts 8-10 + PIN + limits
+static const uint8_t CMD_MAP_CURVE_LO[]  = { 0x31, 0x32, 0x40, 0x0D }; // "12@\r" vacuum/MAP pts 1-7
+static const uint8_t CMD_MAP_CURVE_HI[]  = { 0x31, 0x33, 0x40, 0x0D }; // "13@\r" vacuum/MAP pts 8-10
+static const uint8_t CMD_VERSION[]       = { 0x76, 0x40, 0x0D };       // "v@\r"  triggers live data stream
 
 // ── Realtime control commands ─────────────────────────────────────────────────
 static const uint8_t CMD_ADV_PLUS[]      = { 0x61 }; // 'a' — increase advance in tune mode
@@ -251,7 +261,7 @@ static void connectTask(void*) {
     bool sec = _client->secureConnection();
     wlog("[ign] secure: %s", sec ? "ok" : "not required / failed");
 
-    // Subscribe to TX (6e400003) — and also try RX (6e400002) in case roles are swapped
+    // Subscribe to TX — also try RX in case the device returns swapped roles
     bool subTx = false, subRx = false;
     if (_txChar->canNotify())   subTx = _txChar->subscribe(true,  notifyCB);
     if (_txChar->canIndicate()) subTx = _txChar->subscribe(false, notifyCB);
@@ -264,20 +274,49 @@ static void connectTask(void*) {
         return;
     }
 
-    // Full 3-step handshake after subscribe.  All writes are write-command (no response)
-    // which is the standard NUS transport mode.  500 ms initial settle, 300 ms between steps.
+    // Mimic the iOS app: read Info and Body characteristics once after subscribing.
+    // Some firmware revisions gate the streaming on these reads.
+    if (auto* infoSvc = _client->getService(SVC_UUID)) {
+        if (auto* info = infoSvc->getCharacteristic(INFO_UUID)) {
+            if (info->canRead()) {
+                std::string v = info->readValue();
+                wlog("[ign] info read len=%u", (unsigned)v.size());
+            }
+        }
+        if (auto* body = infoSvc->getCharacteristic(BODY_UUID)) {
+            if (body->canRead()) {
+                std::string v = body->readValue();
+                wlog("[ign] body read len=%u", (unsigned)v.size());
+            }
+        }
+    }
+
+    // Full 6-step handshake after subscribe.  All writes are write-command (no response).
+    // Live data only begins after "v@\r" (step 6) per the published reverse-engineering.
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    _rxChar->writeValue(CMD_KEEPALIVE,  sizeof(CMD_KEEPALIVE),  false);
-    wlog("[ign] hs 1/3 keepalive");
+    _rxChar->writeValue(CMD_KEEPALIVE,    sizeof(CMD_KEEPALIVE),    false);
+    wlog("[ign] hs 1/6 keepalive");
     vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
 
-    _rxChar->writeValue(CMD_ADV_CURVE,  sizeof(CMD_ADV_CURVE),  false);
-    wlog("[ign] hs 2/3 adv-curve");
+    _rxChar->writeValue(CMD_ADV_CURVE_LO, sizeof(CMD_ADV_CURVE_LO), false);
+    wlog("[ign] hs 2/6 adv-curve-lo (10@)");
     vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
 
-    _rxChar->writeValue(CMD_CONFIG,     sizeof(CMD_CONFIG),     false);
-    wlog("[ign] hs 3/3 config");
+    _rxChar->writeValue(CMD_ADV_CURVE_HI, sizeof(CMD_ADV_CURVE_HI), false);
+    wlog("[ign] hs 3/6 adv-curve-hi (11@)");
+    vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
+
+    _rxChar->writeValue(CMD_MAP_CURVE_LO, sizeof(CMD_MAP_CURVE_LO), false);
+    wlog("[ign] hs 4/6 map-curve-lo (12@)");
+    vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
+
+    _rxChar->writeValue(CMD_MAP_CURVE_HI, sizeof(CMD_MAP_CURVE_HI), false);
+    wlog("[ign] hs 5/6 map-curve-hi (13@)");
+    vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
+
+    _rxChar->writeValue(CMD_VERSION,      sizeof(CMD_VERSION),      false);
+    wlog("[ign] hs 6/6 version (v@) — live data should now stream");
 
     _notifyCount  = 0;
     _keepaliveMs  = millis();
