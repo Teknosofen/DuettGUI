@@ -41,8 +41,9 @@ static bool                     _addrFound = false;
 static NimBLERemoteCharacteristic* _rxChar = nullptr;
 static NimBLERemoteCharacteristic* _txChar = nullptr;
 static uint32_t                 _retryMs      = 0;
-static uint32_t                 _keepaliveMs  = 0;
-static uint32_t                 _serialMs     = 0;
+static uint32_t                 _pollMs       = 0;   // 1 s poll to trigger device responses
+static uint32_t                 _wlogMs       = 0;   // 10 s status wlog
+static uint32_t                 _serialMs     = 0;   // 1 Hz serial data output
 static constexpr uint32_t       RETRY_MS   = 8000;
 static constexpr uint32_t       HS_GAP_MS  = 300;  // delay between handshake steps
 
@@ -336,10 +337,12 @@ static void connectTask(void*) {
     wlog("[ign] hs 6/6 version (v@) — live data should now stream");
 
     _notifyCount  = 0;
-    _keepaliveMs  = millis();
+    _pollMs       = millis() - 1100;  // fire first poll immediately
+    _wlogMs       = millis();
+    _serialMs     = millis();
     vdata.ign_connected = true;
     _state = IgnBtState::ACTIVE;
-    wlog("[ign] ACTIVE — streaming data");
+    wlog("[ign] ACTIVE — polling at 1 Hz");
     vTaskDelete(nullptr);
 }
 
@@ -396,15 +399,20 @@ void ignition_bt_update() {
                 _retryMs = millis();
                 break;
             }
-            // Keepalive CR every 10 s + log current values
-            if (millis() - _keepaliveMs >= 10000) {
-                _keepaliveMs = millis();
+            // Poll every 1 s — device only sends notifications in response to commands.
+            // Without this the device goes silent after the handshake.
+            if (millis() - _pollMs >= 1000) {
+                _pollMs = millis();
+                if (_rxChar)
+                    _rxChar->writeValue(CMD_KEEPALIVE, sizeof(CMD_KEEPALIVE), false);
+            }
+            // Status wlog every 10 s
+            if (millis() - _wlogMs >= 10000) {
+                _wlogMs = millis();
                 wlog("[ign] RPM=%.0f  ADV=%.1f  TEMP=%.0f  V=%.2f  A=%.2f  MAP=%.0f  N=%lu",
                      vdata.rpm, vdata.ign_advance_deg, vdata.ign_temp_c,
                      vdata.ign_voltage_v, vdata.ign_ampere, vdata.ign_pressure_kpa,
                      _notifyCount);
-                if (_rxChar)
-                    _rxChar->writeValue(CMD_KEEPALIVE, sizeof(CMD_KEEPALIVE), false);
             }
             // 1 Hz serial output: RPM / voltage / current / MAP
             if (millis() - _serialMs >= 1000) {
