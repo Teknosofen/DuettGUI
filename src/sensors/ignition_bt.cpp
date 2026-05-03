@@ -42,6 +42,7 @@ static NimBLERemoteCharacteristic* _rxChar = nullptr;
 static NimBLERemoteCharacteristic* _txChar = nullptr;
 static uint32_t                 _retryMs      = 0;
 static uint32_t                 _keepaliveMs  = 0;
+static uint32_t                 _serialMs     = 0;
 static constexpr uint32_t       RETRY_MS   = 8000;
 static constexpr uint32_t       HS_GAP_MS  = 300;  // delay between handshake steps
 
@@ -129,12 +130,20 @@ static uint32_t _notifyCount = 0;
 static void notifyCB(NimBLERemoteCharacteristic* /*pChar*/,
                      uint8_t* pData, size_t length, bool /*isNotify*/) {
     _notifyCount++;
-    // Log first 8 notifications as hex so we can verify data and protocol
-    if (_notifyCount <= 8) {
-        char hex[64]; int n = 0;
-        for (size_t i = 0; i < length && n < 60; i++)
-            n += snprintf(hex + n, sizeof(hex) - n, "%02X ", pData[i]);
-        wlog("[ign] notify #%lu  len=%u  %s", _notifyCount, (unsigned)length, hex);
+    // Log first 20 notifications in full, 20 bytes per log line
+    if (_notifyCount <= 20) {
+        size_t off = 0;
+        while (off < length) {
+            char hex[70]; int n = 0;
+            size_t end = off + 20; if (end > length) end = length;
+            for (size_t i = off; i < end; i++)
+                n += snprintf(hex + n, sizeof(hex) - n, "%02X ", pData[i]);
+            if (off == 0)
+                wlog("[ign] notify #%lu  len=%u  %s", _notifyCount, (unsigned)length, hex);
+            else
+                wlog("[ign]   +%02u  %s", (unsigned)off, hex);
+            off = end;
+        }
     }
     parseStream(pData, length);
 }
@@ -387,11 +396,23 @@ void ignition_bt_update() {
                 _retryMs = millis();
                 break;
             }
-            // Keepalive CR every 20 s — prevents device-side idle timeout
-            if (millis() - _keepaliveMs >= 20000) {
+            // Keepalive CR every 10 s + log current values
+            if (millis() - _keepaliveMs >= 10000) {
                 _keepaliveMs = millis();
+                wlog("[ign] RPM=%.0f  ADV=%.1f  TEMP=%.0f  V=%.2f  A=%.2f  MAP=%.0f  N=%lu",
+                     vdata.rpm, vdata.ign_advance_deg, vdata.ign_temp_c,
+                     vdata.ign_voltage_v, vdata.ign_ampere, vdata.ign_pressure_kpa,
+                     _notifyCount);
                 if (_rxChar)
                     _rxChar->writeValue(CMD_KEEPALIVE, sizeof(CMD_KEEPALIVE), false);
+            }
+            // 1 Hz serial output: RPM / voltage / current / MAP
+            if (millis() - _serialMs >= 1000) {
+                _serialMs = millis();
+                Serial.printf("RPM=%.0f V=%.2f A=%.2f MAP=%.1f ADV=%.1f TEMP=%.0f\n",
+                              vdata.rpm, vdata.ign_voltage_v, vdata.ign_ampere,
+                              vdata.ign_pressure_kpa, vdata.ign_advance_deg,
+                              vdata.ign_temp_c);
             }
             break;
 
