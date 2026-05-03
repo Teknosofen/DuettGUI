@@ -66,7 +66,7 @@ board_build.filesystem          = littlefs
 lib_deps =
     lovyan03/LovyanGFX @ ^1.1.16
     adafruit/Adafruit GPS Library @ ^1.5.4
-    h2zero/NimBLE-Arduino @ ^1.4.3
+    h2zero/NimBLE-Arduino @ ^2.0.0
 
 [env:usb]
 extends      = base

@@ -189,28 +189,39 @@ static ScanCB _scanCB;
 // All blocking BLE operations run here so loop()/WiFi are never stalled.
 
 static bool setupChars() {
-    // Try the known service UUID first; fall back to scanning all services.
-    // The advertised service UUID varies across firmware versions.
-    NimBLERemoteService* svc = _client->getService(SVC_UUID);
-    if (!svc) {
-        wlog("[ign] known service UUID not found — scanning all services");
-        auto& svcs = _client->getServices(true);
-        wlog("[ign] device exposes %d service(s):", (int)svcs.size());
-        for (auto* s : svcs) {
-            auto* rx = s->getCharacteristic(RX_UUID);
-            auto* tx = s->getCharacteristic(TX_UUID);
-            wlog("[ign]   %s  rx=%s tx=%s",
-                 s->getUUID().toString().c_str(),
-                 rx ? "YES" : "no", tx ? "YES" : "no");
-            if (rx && tx && !svc) svc = s;
-        }
-        if (!svc) { wlog("[ign] no service with RX+TX found"); return false; }
-        wlog("[ign] using service %s", svc->getUUID().toString().c_str());
+    // Enumerate ALL services with a forced GATT discovery pass.
+    // getService() alone can return nullptr even when the service exists,
+    // and calling getCharacteristic() on a service whose characteristic list
+    // has not been fetched yet always returns nullptr.  The correct sequence
+    // is: getServices(true) → find target service → getCharacteristics(true)
+    // on that specific service → then look up by UUID.
+    auto& svcs = _client->getServices(true);
+    wlog("[ign] device exposes %d service(s):", (int)svcs.size());
+
+    NimBLERemoteService* svc = nullptr;
+    for (auto* s : svcs) {
+        bool isNus = (s->getUUID() == NimBLEUUID(SVC_UUID));
+        wlog("[ign]   %s%s", s->getUUID().toString().c_str(), isNus ? "  <- NUS" : "");
+        if (isNus) svc = s;
     }
+
+    if (!svc) { wlog("[ign] NUS service not found"); return false; }
+
+    // Explicitly discover characteristics within the NUS service and log them all.
+    auto& chars = svc->getCharacteristics(true);
+    wlog("[ign] NUS has %d char(s):", (int)chars.size());
+    for (auto* c : chars) {
+        wlog("[ign]   %s  write=%s notify=%s indicate=%s",
+             c->getUUID().toString().c_str(),
+             c->canWrite()           ? "yes" : "no",
+             c->canNotify()          ? "yes" : "no",
+             c->canIndicate()        ? "yes" : "no");
+    }
+
     _rxChar = svc->getCharacteristic(RX_UUID);
     _txChar = svc->getCharacteristic(TX_UUID);
-    if (!_rxChar) { wlog("[ign] RX char not found"); return false; }
-    if (!_txChar) { wlog("[ign] TX char not found"); return false; }
+    if (!_rxChar) { wlog("[ign] RX char (6e400002) not found"); return false; }
+    if (!_txChar) { wlog("[ign] TX char (6e400003) not found"); return false; }
     wlog("[ign] chars OK");
     return true;
 }
@@ -243,18 +254,6 @@ static void connectTask(void*) {
         vTaskDelete(nullptr);
         return;
     }
-
-    // Log full property picture for both characteristics
-    wlog("[ign] RX(02) canWrite=%s canWriteNoRsp=%s canNotify=%s canRead=%s",
-         _rxChar->canWrite()           ? "yes" : "no",
-         _rxChar->canWriteNoResponse() ? "yes" : "no",
-         _rxChar->canNotify()          ? "yes" : "no",
-         _rxChar->canRead()            ? "yes" : "no");
-    wlog("[ign] TX(03) canWrite=%s canNotify=%s canIndicate=%s canRead=%s",
-         _txChar->canWrite()           ? "yes" : "no",
-         _txChar->canNotify()          ? "yes" : "no",
-         _txChar->canIndicate()        ? "yes" : "no",
-         _txChar->canRead()            ? "yes" : "no");
 
     // Attempt encrypted/bonded connection — device may require pairing before streaming
     wlog("[ign] requesting secure connection...");
