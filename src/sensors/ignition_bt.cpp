@@ -200,8 +200,9 @@ static bool setupChars() {
 
     NimBLERemoteService* svc = nullptr;
     for (auto* s : svcs) {
-        bool isNus = (s->getUUID() == NimBLEUUID(SVC_UUID));
-        wlog("[ign]   %s%s", s->getUUID().toString().c_str(), isNus ? "  <- NUS" : "");
+        const std::string ustr = s->getUUID().toString();
+        bool isNus = (strcasecmp(ustr.c_str(), SVC_UUID) == 0);
+        wlog("[ign]   %s%s", ustr.c_str(), isNus ? "  <- NUS" : "");
         if (isNus) svc = s;
     }
 
