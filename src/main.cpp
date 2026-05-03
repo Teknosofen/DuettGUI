@@ -29,6 +29,8 @@ static ScreenCube     screenCube;
 
 void setup()
 {
+    Serial.begin(115200);  // GPS disabled — UART0 free for debug output
+
     // WiFi AP + web console — replaces Serial debug (UART0 is used by GPS).
     wifi_log_init();
     ota_init();
@@ -48,9 +50,10 @@ void setup()
     logger_init();
     wlog("[2/5] storage OK");
 
-    wlog("[3/5] gps_init");
-    gps_init();
-    wlog("[3/5] GPS OK");
+    // wlog("[3/5] gps_init");
+    // gps_init();
+    // wlog("[3/5] GPS OK");
+    wlog("[3/5] GPS disabled (UART0 in use for Serial debug)");
 
     wlog("[4/5] ignition_bt_init  heap=%u KB", (unsigned)(ESP.getFreeHeap() / 1024));
     ignition_bt_init();
@@ -80,7 +83,7 @@ void loop()
 {
     wifi_log_update();
     ota_update();
-    gps_update();
+    // gps_update();
     ignition_bt_update();
     sim_update();      // writes vdata when sim is ON; skips when OFF or SIM_ENABLE=0
     logger_update();

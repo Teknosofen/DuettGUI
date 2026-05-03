@@ -194,4 +194,5 @@ void wlog(const char* fmt, ...)
     va_end(ap);
 
     _total++;
+    Serial.println(dst);
 }
