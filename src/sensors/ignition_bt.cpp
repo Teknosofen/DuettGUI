@@ -146,7 +146,11 @@ static void notifyCB(NimBLERemoteCharacteristic* /*pChar*/,
             off = end;
         }
     }
-    parseStream(pData, length);
+    // Only parse live packets during ACTIVE — handshake responses are curve/version
+    // config data in a different ASCII format that produces garbage if fed to the
+    // 5-byte binary parser.
+    if (_state == IgnBtState::ACTIVE)
+        parseStream(pData, length);
 }
 
 class ClientCB : public NimBLEClientCallbacks {
@@ -335,6 +339,16 @@ static void connectTask(void*) {
 
     _rxChar->writeValue(CMD_VERSION,      sizeof(CMD_VERSION),      false);
     wlog("[ign] hs 6/6 version (v@) — live data should now stream");
+
+    // Discard any bytes buffered during handshake and clear stale ign values.
+    // Handshake responses are ASCII curve/version data — not live packets.
+    _bufLen               = 0;
+    vdata.rpm             = 0.0f;
+    vdata.ign_advance_deg = 0.0f;
+    vdata.ign_temp_c      = 0.0f;
+    vdata.ign_voltage_v   = 0.0f;
+    vdata.ign_pressure_kpa = 0.0f;
+    vdata.ign_ampere      = 0.0f;
 
     _notifyCount  = 0;
     _pollMs       = millis() - 1100;  // fire first poll immediately
