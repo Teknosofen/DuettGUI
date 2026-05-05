@@ -338,7 +338,10 @@ static void connectTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
 
     _rxChar->writeValue(CMD_VERSION,      sizeof(CMD_VERSION),      false);
-    wlog("[ign] hs 6/6 version (v@) — live data should now stream");
+    wlog("[ign] hs 6/6 version (v@)");
+    // Wait for the version response to arrive while still in HANDSHAKING state
+    // so it is NOT parsed as live data.  State is ACTIVE only after this delay.
+    vTaskDelay(pdMS_TO_TICKS(400));
 
     // Discard any bytes buffered during handshake and clear stale ign values.
     // Handshake responses are ASCII curve/version data — not live packets.
