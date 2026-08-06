@@ -110,10 +110,10 @@ upload_flags    = --auth=duett1964
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                             ScreenManager                                    │
 │          touch polling · page switching · nav bar                            │
-├────────┬──────────┬─────────┬─────────┬─────────┬──────────┬───────────────┤
-│ Screen │ Screen   │ Screen  │ Screen  │ Screen  │ Screen   │ Screen        │
-│ Dash   │ Ignition │ Vehicle │ GPS     │ Storage │ Settings │ Cube          │
-├────────┴──────────┴─────────┴─────────┴─────────┴──────────┴───────────────┤
+├────────┬──────────┬─────────┬─────────┬─────────┬─────────┬──────────┬─────┤
+│ Screen │ Screen   │ Screen  │ Screen  │ Screen  │ Screen  │ Screen   │Scrn │
+│ Dash   │ Ignition │ IgnScope│ Vehicle │ GPS     │ Storage │ Settings │Cube │
+├────────┴──────────┴─────────┴─────────┴─────────┴─────────┴──────────┴─────┤
 │              Widget  (dataRow · hRule · vRule · sectionLabel)                │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                              VehicleData                                     │
@@ -178,6 +178,7 @@ src/
 │   ├── screen_manager.h/.cpp   — page registry · touch routing · nav bar
 │   ├── screen_dash.h/.cpp      — Dashboard: speed + RPM dials with extras
 │   ├── screen_ignition.h/.cpp  — 123-ignition data display + advance/tune controls
+│   ├── screen_ign_scope.h/.cpp — RPM/advance 60 s oscilloscope-style sweep
 │   ├── screen_vehicle.h/.cpp   — two-column engine / fuel readout
 │   ├── screen_gps.h/.cpp       — GPS speed · heading · position
 │   ├── screen_storage.h/.cpp   — SD status · logging toggle · file info
@@ -362,11 +363,12 @@ The two-column layout is supported via the `col` parameter (`0` = left, `1` = ri
 |---|---|---|
 | 1 | `ScreenDash` | Dashboard |
 | 2 | `ScreenIgnition` | Ignition |
-| 3 | `ScreenVehicle` | Vehicle |
-| 4 | `ScreenGPS` | GPS |
-| 5 | `ScreenStorage` | Storage |
-| 6 | `ScreenSettings` | Settings |
-| 7 | `ScreenCube` | Cube Demo |
+| 3 | `ScreenIgnScope` | Scope |
+| 4 | `ScreenVehicle` | Vehicle |
+| 5 | `ScreenGPS` | GPS |
+| 6 | `ScreenStorage` | Storage |
+| 7 | `ScreenSettings` | Settings |
+| 8 | `ScreenCube` | Cube Demo |
 
 ---
 
@@ -475,7 +477,7 @@ The centre number (`drawNumber`) uses **DejaVu40** for the value and **DejaVu18*
 
 ---
 
-### ScreenStorage  —  `"Storage"` (page 5)
+### ScreenStorage  —  `"Storage"` (page 6)
 
 Shows SD card health, storage capacity, and logging controls on a single screen.
 
@@ -513,7 +515,7 @@ No sprite — draws directly on `gfx`.
 
 ---
 
-### ScreenSettings  —  `"Settings"` (page 6)
+### ScreenSettings  —  `"Settings"` (page 7)
 
 Runtime configuration. Currently contains one setting: the simulation toggle.
 
@@ -547,7 +549,7 @@ No sprite — draws directly on `gfx`.
 
 ---
 
-### ScreenCube  —  `"Cube Demo"` (page 7)
+### ScreenCube  —  `"Cube Demo"` (page 8)
 
 Rotating wireframe 3D cube, touch to move. Uses a 300×300 sprite (~175 KB internal heap) centred in the content area. Falls back to direct draw if allocation fails.
 
@@ -595,7 +597,41 @@ No sprite — draws directly on `gfx`.
 
 ---
 
-### ScreenVehicle  —  `"Vehicle"` (page 3)
+### ScreenIgnScope  —  `"Scope"` (page 3)
+
+RPM (green) and ignition advance (cyan) over a fixed 60-second window, drawn as a genuine **oscilloscope-style sweep** rather than a scrolling trend chart: a beam sweeps left-to-right across the plot and wraps back to x=0, overwriting the previous lap as it goes — like an ECG or CRT scope display.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  RPM 2450                                                    ADV 18.4° │  y=0–32  (green / cyan)
+├─────────────────────────────────────────────────────────────────────────┤  y=32
+│ 6000┌───────────┬───────────┬───────────┬───────────┬───────────┐40°   │
+│     │           │  ╱╲       │           │      ╱‾‾╲ │           │      │
+│     │  ╲___╱‾╲__│_╱  ╲______│╲__________│_____╱    ╲│___________│      │  ← swept plot
+│     │           │           │  ╲___╱‾‾╲_│           │           │      │     area
+│    0└───────────┴───────────┴───────────┴───────────┴───────────┘-10°  │
+│    0s          10s         20s         30s         40s    50s    60s   │  ← static, never
+└─────────────────────────────────────────────────────────────────────────┘     swept over
+```
+
+| Element | Detail |
+|---|---|
+| Sweep period | 60 s full width (`SWEEP_MS`), restarts fresh every time the page is entered |
+| RPM trace | Green `0x00FF88`, scaled 0–6000 rpm (matches the Dashboard RPM dial range) |
+| Advance trace | Cyan `0x00BFFF`, scaled −10° to 40° BTDC |
+| Blanking gap | 6 px blanked immediately ahead of the beam (`GAP_PX`) — creates the visible "erase zone" and clears the previous lap's trace at that x before drawing new data there |
+| Grid | 5 interior vertical lines (10 s marks) + 1 horizontal mid-line; redrawn every time the beam's blanking gap sweeps over them, so the graticule survives being swept |
+| Tick labels | `0s`…`60s` drawn once in a static strip **below** the plot, outside the swept region — never erased or redrawn |
+
+No history buffer is kept — the physical pixels on screen are the history. Leaving and returning to the page triggers a full redraw (`_needsRedraw`) which clears the plot and restarts the sweep from t=0; there is no continuity of the trace across page visits.
+
+No sprite — draws directly on `gfx`.
+
+**Render strategy:** full clear + static frame/grid/labels on `_needsRedraw`. Every subsequent `update()`: header RPM/ADV values redrawn only when their formatted string changes (same pattern as `ScreenIgnition`); the sweep itself advances by computing the current beam x from `millis()` modulo `SWEEP_MS`, blanking a small strip ahead of it, redrawing any grid lines inside that strip, then drawing a line segment from the last plotted point to the new one for each trace. On wraparound (new x < last x) no connecting line is drawn — the beam just starts a fresh point at x=0 to avoid a spurious line across the full width.
+
+---
+
+### ScreenVehicle  —  `"Vehicle"` (page 4)
 
 Seven `Widget::dataRow` rows split across two columns, centred vertically in the 432 px content area.
 
@@ -623,7 +659,7 @@ No sprite — draws directly on `gfx`.
 
 **Render strategy:** on `_needsRedraw` performs a full render (background + vRule divider + all labels, units, values); on subsequent frames calls `Widget::updateRowValue()` for each row, which erases and redraws the value cell only when the formatted string changes.
 
-### ScreenGPS  —  `"GPS"` (page 4)
+### ScreenGPS  —  `"GPS"` (page 5)
 
 ```
 ┌──────────────────────┬──────────────────────────┐
@@ -669,7 +705,7 @@ sim_set(true);    // resume simulation
 bool active = sim_running();
 ```
 
-The Settings page (page 6) exposes this toggle as a touch button. The default runtime state is `true` (simulation runs on boot when `SIM_ENABLE 1`).
+The Settings page (page 7) exposes this toggle as a touch button. The default runtime state is `true` (simulation runs on boot when `SIM_ENABLE 1`).
 
 `sim_update()` is called in `loop()` **after** `ignition_bt_update()`. When `sim_running()` is true it overwrites all `vdata` fields (including `rpm`). When false it returns immediately, leaving sensor and BLE data untouched.
 
@@ -724,19 +760,20 @@ Integrates the **123ignition TUNE+** electronic ignition module directly into th
 
 ### BLE identifiers
 
-The 123ignition TUNE+ exposes a **proprietary 128-bit service** (not Nordic UART, despite a previous theory). UUIDs below are taken from the published, working ESP32 simulator [iafilius/123Tune-plus-Simulator](https://github.com/iafilius/123Tune-plus-Simulator), which is accepted byte-for-byte by the official iOS 123Tune+ app and is therefore authoritative.
+**Confirmed by capturing a real BLE HCI snoop log of the official Android 123Tune+ app** (see [Appendix A.9](#a9-final-resolution-ble-hci-snoop-of-the-official-app)): the 123ignition TUNE+ uses the **standard Nordic UART Service (NUS)** — plain serial-over-BLE. There is no custom 128-bit service; a primary-service discovery in the snoop log shows only the six services below.
 
 | Item | UUID | Properties |
 |---|---|---|
-| Primary service | `da2b84f1-6279-48de-bdc0-afbea0226079` | — |
-| Info characteristic | `99564a02-dc01-4d3c-b04e-3bb1ef0571b2` | read |
-| Body characteristic | `a87988b9-694c-479c-900e-95dfa6c00a24` | read/write |
-| **RX (commands → module)** | `bf03260c-7205-4c25-af43-93b1c299d159` | write |
-| **TX (notifications → host)** | `18cda784-4bd3-4370-85bb-bfed91ec86af` | notify |
+| GAP | `0x1800` (standard) | — |
+| GATT | `0x1801` (standard) | — |
+| **NUS (primary service)** | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | — |
+| **RX (commands → module)** | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | write, write-without-response |
+| **TX (notifications → host)** | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | notify |
+| TX Power | `0x1804` (standard) | — |
+| Device Information | `0x180A` (standard) | — |
 | Battery service | `0x180F` (standard) | — |
-| Battery level | `0x2A19` (standard) | read |
 
-The scan matches by service UUID first; also accepts any advertising device whose name contains `"123"` as a fallback.
+The scan matches only by advertised name containing `"123"` — there is no service UUID to advertise-match on.
 
 ### Connection state machine
 
@@ -756,22 +793,19 @@ The connect attempt runs in a short-lived FreeRTOS task so `loop()` stays respon
 
 ### Handshake sequence
 
-> **Source:** the six-step handshake below is documented in `iafilius/123Tune-plus-Simulator` (`ESP32-Arduino/ESP32_123Tune_plus_server/ble.ino`). The simulator's own comment is the smoking gun: *"All Meter values show up after command 6 !!! — Service command 'v@' (Version Service Command) returns voltage, Temp, pressure and hardware/software version."* The previous 3-step handshake stopped at step 3 and is the reason no notifications were received.
+> **Source:** determined by capturing a real BLE HCI snoop log of the official Android 123Tune+ app talking to the actual hardware — see [Appendix A.9](#a9-final-resolution-ble-hci-snoop-of-the-official-app). Two earlier theories (a proprietary 128-bit service; a six-command handshake borrowed from an unrelated ESP32 simulator project) were both wrong. The real app sends only **three** commands, and every one of them carries a trailing `0x24` (`'$'`) that earlier attempts omitted.
 
-After subscribing to TX notifications, six commands are written to the RX characteristic in order with ~300 ms gaps. Live data only begins after step 6.
+After subscribing to TX notifications, three commands are written to the RX characteristic in order with ~300 ms gaps:
 
 | Step | Bytes | ASCII | Purpose |
 |---|---|---|---|
-| 1 | `0D` | `\r` | Keepalive / sync |
-| 2 | `31 30 40 0D` | `10@\r` | Advance curve points 1–7 (RPM/degrees) |
-| 3 | `31 31 40 0D` | `11@\r` | Advance curve points 8–10 + PIN + RPM limit |
-| 4 | `31 32 40 0D` | `12@\r` | Vacuum/MAP curve points 1–7 |
-| 5 | `31 33 40 0D` | `13@\r` | Vacuum/MAP curve points 8–10 |
-| 6 | `76 40 0D` | `v@\r` | **Version + live data trigger** — starts streaming |
+| 1 | `76 40 0D 24` | `v@\r$` | Version — device replies with a curve-format echo |
+| 2 | `31 31 40 0D 24` | `11@\r$` | Advance-curve-hi — device replies with a curve-format echo |
+| 3 | `31 30 40 0D 24` | `10@\r$` | Advance-curve-lo — **device sends no reply to this one** and instead goes straight into a continuous, unprompted stream of live 5-byte packets |
 
-The Info and Body characteristics are read once before step 1, mimicking the iOS app (some firmware revisions gate the streaming on these reads).
+`12@`/`13@` (MAP curve) are never sent by the real app and are not needed to start streaming. There is no separate Info/Body characteristic read step — that was based on the now-debunked custom-service theory; this device has no such characteristics.
 
-A periodic keepalive (`0x0D`) is sent every 20 s while ACTIVE to prevent the device's idle timeout. Padding bytes `0x24` may appear on either side of any command and are stripped by the parser.
+A bare `"$"` (`0x24`) keepalive is sent every 1 s while ACTIVE, mirroring behaviour observed in the real app's traffic (irregular ~0.1–1.5 s gaps there). It does not appear strictly required to sustain the stream, but is cheap and proven-safe to replicate. Padding bytes `0x24` may appear on either side of any command and are stripped by the parser.
 
 ### Packet format
 
@@ -1001,7 +1035,7 @@ Use for data logging and large assets. `sd_init()` calls `wlog()` with card type
 
 The RGB panel framebuffer is allocated by `esp_lcd_rgb_panel_create()` at `display->init()` — outside the Arduino heap — which is why `ESP.getPsramSize()` reports 0 while the display works normally.
 
-The `ScreenCube` sprite (300×300, 175 KB) is allocated from internal SRAM. `ScreenVehicle`, `ScreenGPS`, `ScreenStorage`, `ScreenIgnition`, and `ScreenSettings` draw directly with no sprite.
+The `ScreenCube` sprite (300×300, 175 KB) is allocated from internal SRAM. `ScreenVehicle`, `ScreenGPS`, `ScreenStorage`, `ScreenIgnition`, `ScreenIgnScope`, and `ScreenSettings` draw directly with no sprite.
 
 The NimBLE stack is initialised by `ignition_bt_init()` and shares the same 2.4 GHz radio as WiFi via the ESP32 coexistence mode. No additional RAM allocation is required beyond the NimBLE stack itself (~30 KB).
 
@@ -1218,6 +1252,8 @@ If the device firmware revision differs from the one Filius reverse-engineered (
 
 **One BLE link only:** The device accepts a single connection. Always fully close the 123Tune+ phone app before DuettGUI boots, or DuettGUI will fail to connect (and vice versa).
 
+> **⚠ Superseded — see [Appendix A.9](#a9-final-resolution-ble-hci-snoop-of-the-official-app).** Both "facts" above turned out to be wrong too: this device has no proprietary 128-bit service (it's plain NUS), and the six-command handshake, while it did produce curve-echo replies, never actually triggered the live stream. The connection would run for a while and then silently die (HCI reason 0x08, supervision timeout) without ever streaming live data. The real fix — found only by capturing the official app's actual BLE traffic — needed just three commands, each with one extra byte this section never mentions. Left in place as a record of the (incorrect) reasoning at the time; do not implement anything from this section as-is.
+
 ---
 
 ### A.8  Diagnostic log lines reference
@@ -1236,11 +1272,49 @@ The following `wlog()` lines are present in `ignition_bt.cpp` and are useful for
 | `TX canNotify=yes canIndicate=no` | Characteristic properties; confirms correct UUID |
 | `secure: ok / not required / failed` | Result of `secureConnection()` attempt |
 | `subscribe TX=ok RX=no` | CCCD written for TX; RX has no notify property (expected) |
-| `hs 1/3 keepalive` | Handshake CR sent |
-| `hs 2/3 adv-curve` | `"10@\r"` sent |
-| `hs 3/3 config` | `"11@\r"` sent |
-| `ACTIVE — streaming data` | State machine reached ACTIVE; `vdata.ign_connected = true` |
-| `notify #N len=X XX XX XX ...` | First 8 notifications logged with raw hex (callback fired) |
-| `BLE disconnected (reason 520)` | Supervision timeout — device stopped responding to link-layer events |
+| `hs 1/3 version (v@\r$)` | `"v@\r$"` sent — expect a curve-format echo reply |
+| `hs 2/3 adv-curve-hi (11@\r$)` | `"11@\r$"` sent — expect a curve-format echo reply |
+| `hs 3/3 adv-curve-lo (10@\r$) — expect live stream to start now` | `"10@\r$"` sent — no reply expected; live stream should start immediately after |
+| `ACTIVE — expecting unprompted live stream, "$" keepalive every 1 s` | State machine reached ACTIVE; `vdata.ign_connected = true` |
+| `keepalive "$"  ok=%d  N=%lu` | Periodic 1 s bare `"$"` ping; `N` is the running notification count — watch this to confirm the stream is actually flowing |
+| `notify #N len=X XX XX XX ...` | First 200 notifications logged with raw hex (callback fired) |
+| `BLE disconnected (reason 520)` | Supervision timeout (HCI reason `0x08 = 512+8`) — seen both on a wedged connection and, harmlessly, at the end of the official app's own sessions in the snoop log; not on its own proof of a problem |
 | `BLE disconnected (reason 534)` | Local disconnect — our code called `_client->disconnect()` |
 | `scan ended found=N reason=N` | Scan cycle ended (after `stop()` or duration expiry) |
+
+---
+
+### A.9 Final resolution: BLE HCI snoop of the official app
+
+**State before this resolution:** the six-step handshake (A.7) reliably produced curve/version echo replies during handshake, entered `ACTIVE`, and then went completely silent — confirmed with a clean test (device power-cycled, zero writes sent for 20+ s in `ACTIVE`): still nothing. A follow-up round of guessed per-metric request commands (`"0@\r"` … `"A@\r"`, and bare single bytes before that) got at best an echo-plus-one-byte non-answer, and the connection eventually died with HCI reason `0x08` (supervision timeout) after one of the guesses — a real ignition-timing controller, so guessing stopped there rather than continuing to iterate blindly against the hardware.
+
+**Method:** captured the official Android 123Tune+ app's actual BLE traffic via a Bluetooth HCI snoop log, then decoded it with a small standalone Python parser (no Wireshark/tshark install needed — the `btsnoop` container format and the HCI/ACL/L2CAP/ATT layers inside it are simple enough to parse directly):
+
+1. Developer options → **Bluetooth HCI snoop log** → **Full**. Also enable **USB debugging**.
+2. Ran the official app, connected, watched it show live RPM/advance for ~20 s, disconnected.
+3. Pulled the log via `adb bugreport myreport.zip` (no root needed) → inside the zip: `FS/data/log/bt/btsnoop_hci.log` (this is the actual path on modern Android; older guidance pointing at `/sdcard/btsnoop_hci.log` or `/data/misc/bluetooth/logs/` is stale — that direct path is no longer populated/accessible without root).
+4. Parsed it: `btsnoop` global header (16 bytes: magic + version + datalink type) → repeated records (24-byte header: original/included length, flags, µs timestamp + payload) → for each ACL-data record, HCI ACL header → L2CAP header → if CID `0x0004` (ATT fixed channel), decode the ATT opcode (`0x08/0x09` Read By Type, `0x10/0x11` Read By Group Type for primary-service discovery, `0x12/0x52` Write Request/Command, `0x1B` Handle Value Notification, etc).
+
+**What the capture showed, decisively:**
+
+- **Primary service discovery** (ATT opcode `0x11`) returned exactly six services — GAP, GATT, NUS (`6e400001…`), TX Power, Device Information, Battery. No `da2b84f1…` custom service exists on the real hardware at all. The A.7 "proprietary 128-bit service" theory, and the whole Info/Body-characteristic-read step built on it, were wrong from the start — the app never touches any such service.
+- The real app sends only **three** commands, not six, and never sends `12@`/`13@`:
+  ```
+  "v@\r$"   (76 40 0D 24)  → curve-format echo reply
+  "11@\r$"  (31 31 40 0D 24) → curve-format echo reply
+  "10@\r$"  (31 30 40 0D 24) → NO reply — device goes straight into continuous live streaming
+  ```
+  Every one of those carries a trailing `0x24` (`'$'`) that every previous attempt — including the original six-step handshake — omitted. That trailing byte, specifically on `"10@\r"`, looks like the actual mode switch between "give me the static curve" and "give me live data".
+- Immediately after `"10@\r$"`, real 5-byte live packets started arriving completely unprompted, e.g. `30 30 41 51 20` (`"00AQ "`) and `31 32 31 44 20` (`"121D "`) — decoding via the *existing, unmodified* `dispatchPacket()` formulas gives RPM = 0 and Advance ≈ 6.6°, i.e. the packet format documented above was already correct; only the trigger to make the device send them was missing.
+- The app also sends an occasional bare `"$"` (`0x24`) at irregular intervals (mostly 100–200 ms, sometimes up to ~1.5 s) throughout the session. The stream kept flowing through gaps with no `"$"` at all, so it does not look required to sustain streaming — but it's cheap and proven-safe to replicate, so `ignition_bt.cpp` sends one every 1 s while `ACTIVE`.
+- A short write of `05 0d` (2 bytes, no obvious meaning) recurs early in the capture and gets echoed back with one extra byte appended (`05 0d 07`) — this is the same "echo + 1 extra byte" behaviour seen from our own earlier guessed commands. It's the device's generic ack for anything it doesn't recognise as a real command, not a hidden protocol feature; it can be ignored.
+- The session's own disconnect, right at the end of the capture, used the exact same HCI reason `0x08` (supervision timeout) our wedged test connection used — evidence that reason code is not on its own proof that something broke; it may just be how Android lets an idle BLE link lapse.
+
+**Fix applied in `ignition_bt.cpp`:**
+
+- Handshake cut from six commands to the three above, each with the trailing `0x24` added (`CMD_VERSION`, `CMD_ADV_CURVE_HI`, `CMD_ADV_CURVE_LO`).
+- Removed the per-metric polling entirely — the device streams on its own once the handshake completes. Replaced with a bare `"$"` keepalive every 1 s.
+- Removed the dead `SVC_UUID`/`INFO_UUID`/`BODY_UUID`/`RX_UUID`/`TX_UUID` constants and the `matchSvc` scan-filter built on them, along with the Info/Body characteristic read step — none of it applies to real hardware.
+- `dispatchPacket()`/`parseStream()` needed **no changes** — the 5-byte packet format they already implemented was correct all along.
+
+**If this breaks again on a different firmware revision:** repeat the snoop capture (steps 1–4 above) rather than guessing — a `btsnoop_hci.log` from a session where the official app is genuinely showing live data is unambiguous ground truth, and decisively ended two separate rounds of plausible-but-wrong theorising in this project.

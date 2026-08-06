@@ -5,28 +5,22 @@
 #include <NimBLEDevice.h>
 #include <Arduino.h>
 
-// ── UUIDs (from iafilius/123Tune-plus-Simulator, ESP32 reverse-engineering port) ─
-// Custom 128-bit UUIDs published by 123ignition TUNE+ firmware. The simulator
-// re-creates these byte-for-byte and is accepted by the official iOS 123Tune+
-// app, so they are considered authoritative.
-static const char* SVC_UUID  = "da2b84f1-6279-48de-bdc0-afbea0226079";
-static const char* INFO_UUID = "99564a02-dc01-4d3c-b04e-3bb1ef0571b2";  // read
-static const char* BODY_UUID = "a87988b9-694c-479c-900e-95dfa6c00a24";  // read/write
-static const char* RX_UUID   = "bf03260c-7205-4c25-af43-93b1c299d159";  // write commands
-static const char* TX_UUID   = "18cda784-4bd3-4370-85bb-bfed91ec86af";  // notify data
 
 // ── Handshake commands ────────────────────────────────────────────────────────
-// Six commands sent in sequence after subscribing to TX (300 ms apart).
-// Live RPM/Advance/Temp/Voltage/Pressure/Ampere notifications begin AFTER the
-// final "v@\r" — see iafilius/123Tune-plus-Simulator ble.ino:
-//   // All Meter values show up after command 6 !!!
-//   // Service command 'v@' (Version Service Command)
-static const uint8_t CMD_KEEPALIVE[]     = { 0x0D };
-static const uint8_t CMD_ADV_CURVE_LO[]  = { 0x31, 0x30, 0x40, 0x0D }; // "10@\r" advance curve pts 1-7
-static const uint8_t CMD_ADV_CURVE_HI[]  = { 0x31, 0x31, 0x40, 0x0D }; // "11@\r" pts 8-10 + PIN + limits
-static const uint8_t CMD_MAP_CURVE_LO[]  = { 0x31, 0x32, 0x40, 0x0D }; // "12@\r" vacuum/MAP pts 1-7
-static const uint8_t CMD_MAP_CURVE_HI[]  = { 0x31, 0x33, 0x40, 0x0D }; // "13@\r" vacuum/MAP pts 8-10
-static const uint8_t CMD_VERSION[]       = { 0x76, 0x40, 0x0D };       // "v@\r"  triggers live data stream
+// Determined by capturing the real 123Tune+ Android app's BLE HCI snoop log —
+// the previously-assumed 6-step sequence (borrowed from the unrelated ESP32
+// simulator project) was wrong. The real app sends only 3 commands, in this
+// order, each with a trailing 0x24 ('$') that our earlier attempts omitted:
+//   "v@\r$"  -> version (curve-format echo reply)
+//   "11@\r$" -> adv-curve-hi (curve-format echo reply)
+//   "10@\r$" -> adv-curve-lo — device sends NO echo reply to this one and
+//               instead goes straight into a continuous, unprompted stream
+//               of real 5-byte live packets. 12@/13@ (MAP curve) are never
+//               sent by the real app and are not needed.
+static const uint8_t CMD_KEEPALIVE[]     = { 0x24 };                         // "$" — bare ping, seen ~every 0.1-1.5 s
+static const uint8_t CMD_VERSION[]       = { 0x76, 0x40, 0x0D, 0x24 };       // "v@\r$"
+static const uint8_t CMD_ADV_CURVE_HI[]  = { 0x31, 0x31, 0x40, 0x0D, 0x24 }; // "11@\r$"
+static const uint8_t CMD_ADV_CURVE_LO[]  = { 0x31, 0x30, 0x40, 0x0D, 0x24 }; // "10@\r$" -> triggers live stream
 
 // ── Realtime control commands ─────────────────────────────────────────────────
 static const uint8_t CMD_ADV_PLUS[]      = { 0x61 }; // 'a' — increase advance in tune mode
@@ -41,11 +35,11 @@ static bool                     _addrFound = false;
 static NimBLERemoteCharacteristic* _rxChar = nullptr;
 static NimBLERemoteCharacteristic* _txChar = nullptr;
 static uint32_t                 _retryMs      = 0;
-static uint32_t                 _pollMs       = 0;   // 1 s poll to trigger device responses
-static uint32_t                 _wlogMs       = 0;   // 10 s status wlog
-static uint32_t                 _serialMs     = 0;   // 1 Hz serial data output
+static uint32_t                 _pollMs       = 0;
+static uint32_t                 _wlogMs       = 0;
+static uint32_t                 _serialMs     = 0;
 static constexpr uint32_t       RETRY_MS   = 8000;
-static constexpr uint32_t       HS_GAP_MS  = 300;  // delay between handshake steps
+static constexpr uint32_t       HS_GAP_MS  = 300;
 
 // ── Packet stream buffer ──────────────────────────────────────────────────────
 // Protocol: 5-byte packets  [cmd][MSB][LSB][csum][0x20|0x0D]
@@ -132,7 +126,7 @@ static void notifyCB(NimBLERemoteCharacteristic* /*pChar*/,
                      uint8_t* pData, size_t length, bool /*isNotify*/) {
     _notifyCount++;
     // Log first 20 notifications in full, 20 bytes per log line
-    if (_notifyCount <= 20) {
+    if (_notifyCount <= 200) {
         size_t off = 0;
         while (off < length) {
             char hex[70]; int n = 0;
@@ -173,19 +167,19 @@ static ClientCB _clientCB;
 
 class ScanCB : public NimBLEScanCallbacks {
     void onDiscovered(const NimBLEAdvertisedDevice* dev) override {
-        bool matchSvc  = dev->haveServiceUUID() &&
-                         dev->isAdvertisingService(NimBLEUUID(SVC_UUID));
+        // Match by name only. There is no custom advertised service to match on —
+        // confirmed via a real BLE HCI snoop: the device's only GATT services are
+        // GAP/GATT/NUS(6e400001)/TxPower/DeviceInfo/Battery.
         bool matchName = dev->haveName() &&
                          strstr(dev->getName().c_str(), "123") != nullptr;
 
-        wlog("[ign] scan: '%s'  %s  RSSI=%d  svc=%s name=%s",
+        wlog("[ign] scan: '%s'  %s  RSSI=%d  name=%s",
              dev->haveName() ? dev->getName().c_str() : "(no name)",
              dev->getAddress().toString().c_str(),
              dev->getRSSI(),
-             matchSvc  ? "MATCH" : (dev->haveServiceUUID() ? "no" : "-"),
              matchName ? "MATCH" : "no");
 
-        if (matchSvc || matchName) {
+        if (matchName) {
             wlog("[ign] >> SELECTED  addr=%s", dev->getAddress().toString().c_str());
             NimBLEDevice::getScan()->stop();
             _devAddr   = dev->getAddress();
@@ -296,52 +290,26 @@ static void connectTask(void*) {
         return;
     }
 
-    // Mimic the iOS app: read Info and Body characteristics once after subscribing.
-    // Some firmware revisions gate the streaming on these reads.
-    if (auto* infoSvc = _client->getService(SVC_UUID)) {
-        if (auto* info = infoSvc->getCharacteristic(INFO_UUID)) {
-            if (info->canRead()) {
-                std::string v = info->readValue();
-                wlog("[ign] info read len=%u", (unsigned)v.size());
-            }
-        }
-        if (auto* body = infoSvc->getCharacteristic(BODY_UUID)) {
-            if (body->canRead()) {
-                std::string v = body->readValue();
-                wlog("[ign] body read len=%u", (unsigned)v.size());
-            }
-        }
-    }
-
-    // Full 6-step handshake after subscribe.  All writes are write-command (no response).
-    // Live data only begins after "v@\r" (step 6) per the published reverse-engineering.
+    // 3-step handshake, matching the real app's captured BLE traffic exactly.
+    // (No separate Info/Body read step: GATT primary service discovery in the
+    // snoop log shows only GAP/GATT/NUS/TxPower/DeviceInfo/Battery on this
+    // device — no custom service to read from.)
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    _rxChar->writeValue(CMD_KEEPALIVE,    sizeof(CMD_KEEPALIVE),    false);
-    wlog("[ign] hs 1/6 keepalive");
-    vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
-
-    _rxChar->writeValue(CMD_ADV_CURVE_LO, sizeof(CMD_ADV_CURVE_LO), false);
-    wlog("[ign] hs 2/6 adv-curve-lo (10@)");
+    _rxChar->writeValue(CMD_VERSION,      sizeof(CMD_VERSION),      false);
+    wlog("[ign] hs 1/3 version (v@\\r$)");
     vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
 
     _rxChar->writeValue(CMD_ADV_CURVE_HI, sizeof(CMD_ADV_CURVE_HI), false);
-    wlog("[ign] hs 3/6 adv-curve-hi (11@)");
+    wlog("[ign] hs 2/3 adv-curve-hi (11@\\r$)");
     vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
 
-    _rxChar->writeValue(CMD_MAP_CURVE_LO, sizeof(CMD_MAP_CURVE_LO), false);
-    wlog("[ign] hs 4/6 map-curve-lo (12@)");
-    vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
-
-    _rxChar->writeValue(CMD_MAP_CURVE_HI, sizeof(CMD_MAP_CURVE_HI), false);
-    wlog("[ign] hs 5/6 map-curve-hi (13@)");
-    vTaskDelay(pdMS_TO_TICKS(HS_GAP_MS));
-
-    _rxChar->writeValue(CMD_VERSION,      sizeof(CMD_VERSION),      false);
-    wlog("[ign] hs 6/6 version (v@)");
-    // Wait for the version response to arrive while still in HANDSHAKING state
-    // so it is NOT parsed as live data.  State is ACTIVE only after this delay.
-    vTaskDelay(pdMS_TO_TICKS(400));
+    _rxChar->writeValue(CMD_ADV_CURVE_LO, sizeof(CMD_ADV_CURVE_LO), false);
+    wlog("[ign] hs 3/3 adv-curve-lo (10@\\r$) — expect live stream to start now");
+    // No echo reply to this one in the real capture — it goes straight into
+    // live streaming. Short wait anyway in case a stray reply arrives, so it
+    // isn't mistaken for a live packet by parseStream.
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     // Discard any bytes buffered during handshake and clear stale ign values.
     // Handshake responses are ASCII curve/version data — not live packets.
@@ -354,12 +322,12 @@ static void connectTask(void*) {
     vdata.ign_ampere      = 0.0f;
 
     _notifyCount  = 0;
-    _pollMs       = millis() - 1100;  // fire first poll immediately
+    _pollMs       = millis();
     _wlogMs       = millis();
     _serialMs     = millis();
     vdata.ign_connected = true;
     _state = IgnBtState::ACTIVE;
-    wlog("[ign] ACTIVE — polling at 1 Hz");
+    wlog("[ign] ACTIVE — expecting unprompted live stream, \"$\" keepalive every 1 s");
     vTaskDelete(nullptr);
 }
 
@@ -416,12 +384,19 @@ void ignition_bt_update() {
                 _retryMs = millis();
                 break;
             }
-            // Poll every 1 s — device only sends notifications in response to commands.
-            // Without this the device goes silent after the handshake.
+            // Confirmed from the real app's BLE HCI snoop log: once the 3-step
+            // handshake completes, the device streams live data continuously and
+            // unprompted — no per-metric polling needed at all (the earlier
+            // guessed single-byte probes were never real commands). The real app
+            // does send an occasional bare "$" (0x24) at irregular ~0.1-1.5 s
+            // intervals while streaming; it doesn't look required to sustain the
+            // stream, but it's cheap and proven-safe to replicate.
             if (millis() - _pollMs >= 1000) {
                 _pollMs = millis();
-                if (_rxChar)
-                    _rxChar->writeValue(CMD_KEEPALIVE, sizeof(CMD_KEEPALIVE), false);
+                if (_rxChar) {
+                    bool ok = _rxChar->writeValue(CMD_KEEPALIVE, sizeof(CMD_KEEPALIVE), true);
+                    wlog("[ign] keepalive \"$\"  ok=%d  N=%lu", (int)ok, _notifyCount);
+                }
             }
             // Status wlog every 10 s
             if (millis() - _wlogMs >= 10000) {

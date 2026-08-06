@@ -11,6 +11,7 @@
 #include "ui/screen_manager.h"
 #include "ui/screen_dash.h"
 #include "ui/screen_ignition.h"
+#include "ui/screen_ign_scope.h"
 #include "ui/screen_vehicle.h"
 #include "ui/screen_gps.h"
 #include "ui/screen_storage.h"
@@ -21,6 +22,7 @@ static ScreenManager mgr;
 
 static ScreenDash     screenDash;
 static ScreenIgnition screenIgnition;
+static ScreenIgnScope screenIgnScope;
 static ScreenVehicle  screenVehicle;
 static ScreenGPS      screenGPS;
 static ScreenStorage  screenStorage;
@@ -65,11 +67,12 @@ void setup()
     wlog("[5/5] screen pages");
     mgr.addPage(&screenDash);      // 1 — Dashboard (dials)
     mgr.addPage(&screenIgnition);  // 2 — 123-ignition data + controls
-    mgr.addPage(&screenVehicle);   // 3 — Engine / fuel table
-    mgr.addPage(&screenGPS);       // 4 — GPS
-    mgr.addPage(&screenStorage);   // 5 — Storage / logging
-    mgr.addPage(&screenSettings);  // 6 — Settings (sim toggle)
-    mgr.addPage(&screenCube);      // 7 — Rotating cube demo
+    mgr.addPage(&screenIgnScope);  // 3 — RPM/advance 60 s oscilloscope sweep
+    mgr.addPage(&screenVehicle);   // 4 — Engine / fuel table
+    mgr.addPage(&screenGPS);       // 5 — GPS
+    mgr.addPage(&screenStorage);   // 6 — Storage / logging
+    mgr.addPage(&screenSettings);  // 7 — Settings (sim toggle)
+    mgr.addPage(&screenCube);      // 8 — Rotating cube demo
     mgr.begin();
     wlog("[5/5] ScreenManager OK");
 
